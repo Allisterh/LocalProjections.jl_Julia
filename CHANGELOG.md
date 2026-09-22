@@ -14,6 +14,8 @@
 
 ### Changed
 
+- **Requires CovarianceMatrices 0.32, Regress 0.2, and Julia 1.12.** `vcov(estimator, lp)` reads the diagonal of the `CovarianceMatrix` that CovarianceMatrices 0.32 returns; the results are unchanged. Julia 1.12 is the floor that both dependencies set.
+
 - **`irfplot!` now imported from MacroEconometricTools.jl**: The `irfplot!` function is no longer defined locally — it is imported from MacroEconometricTools.jl (same as `irfplot`). This avoids export collisions when both packages are loaded together. The LP Makie extension adds methods to the shared function.
 
 ### Refactoring
