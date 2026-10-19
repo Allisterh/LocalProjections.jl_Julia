@@ -87,13 +87,6 @@ function _termvars_unary(t::FunctionTerm)
     return Symbol[]
 end
 
-# Add termvars support for lag/lead from ShiftedArrays (used in RHS formulas)
-StatsModels.termvars(t::FunctionTerm{typeof(lag)}) = _termvars_unary(t)
-StatsModels.termvars(t::FunctionTerm{typeof(lead)}) = _termvars_unary(t)
-
-# Add termvars support for StatsModels.LeadLagTerm (created after apply_schema)
-StatsModels.termvars(t::StatsModels.LeadLagTerm) = StatsModels.termvars(t.term)
-
 """
     _unwrap_lhs(lhs_term)
 
@@ -428,19 +421,15 @@ end
 # ============================================================================
 
 """
-    termvars for FunctionTerm{typeof(|)}
+    LPSchemaContext
 
-Extract variable names from pipe operator for schema creation.
-This tells StatsModels which variables are referenced so it can
-properly determine their types (continuous vs categorical).
+Model context passed to `apply_schema` by [`lp`](@ref) and [`lpiv`](@ref).
+The pipe syntax `y|z` is rewritten to an [`AnchorTerm`](@ref) only in this
+context, so `|` keeps its StatsModels meaning in formulas used by other
+packages. Subtyping `StatisticalModel` keeps every schema rule that dispatches
+on `StatisticalModel` in effect.
 """
-function StatsModels.termvars(t::FunctionTerm{typeof(|)})
-    if length(t.args) != 2
-        return Symbol[]
-    end
-    lhs, rhs = t.args
-    return unique(vcat(StatsModels.termvars(lhs), StatsModels.termvars(rhs)))
-end
+abstract type LPSchemaContext <: StatisticalModel end
 
 """
     apply_schema for FunctionTerm{typeof(|)}
@@ -464,7 +453,9 @@ lp(@formula(leads(y)|z ~ x), df; horizon=12)
 
 ```
 """
-function StatsModels.apply_schema(t::FunctionTerm{typeof(|)}, sch::StatsModels.Schema, ctx::Type)
+function StatsModels.apply_schema(
+        t::FunctionTerm{typeof(|)}, sch::StatsModels.Schema, ctx::Type{<:LPSchemaContext}
+    )
     # The pipe operator in formulas: lhs | rhs
     # Convert to AnchorTerm(lhs, rhs, nothing)
     if length(t.args) != 2
@@ -748,8 +739,8 @@ function lp(
     hints = Dict{Symbol, Any}(var => StatsModels.ContinuousTerm for var in all_vars)
 
     sch = StatsModels.schema(formula, df_base, hints)
-    lhs_term = StatsModels.apply_schema(formula.lhs, sch, StatisticalModel)
-    rhs_term = StatsModels.apply_schema(formula.rhs, sch, StatisticalModel)
+    lhs_term = StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext)
+    rhs_term = StatsModels.apply_schema(formula.rhs, sch, LPSchemaContext)
 
     # Check if LHS is a CumulTerm (cumulative impulse response), LeadTerm (forward-looking), or AnchorTerm (anchored)
     # Note: AnchorTerm can contain LeadTerm or CumulTerm inside (from pipe syntax like leads(y)|z or cumul(y)|z)
@@ -771,7 +762,7 @@ function lp(
     end
 
     # Extract all variable names from RHS (including from function terms)
-    rhs_terms = StatsModels.termvars(rhs_term)
+    rhs_terms = StatsModels.termvars(formula.rhs)
     isempty(rhs_terms) &&
         throw(ArgumentError("formula must contain at least one regressor"))
 
@@ -1082,7 +1073,7 @@ Returns:
 - `exo_terms`: Vector of exogenous control terms
 """
 function _parse_lpiv_formula(formula::FormulaTerm, sch)
-    lhs_term = StatsModels.apply_schema(formula.lhs, sch, StatisticalModel)
+    lhs_term = StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext)
 
     endo_terms = AbstractTerm[]
     instr_terms = AbstractTerm[]
@@ -1094,17 +1085,17 @@ function _parse_lpiv_formula(formula::FormulaTerm, sch)
     for term in rhs
         if term isa FormulaTerm
             # IV specification: (endo ~ instruments)
-            endo = StatsModels.apply_schema(term.lhs, sch, StatisticalModel)
+            endo = StatsModels.apply_schema(term.lhs, sch, LPSchemaContext)
             push!(endo_terms, endo)
 
             instrs = term.rhs isa Tuple ? term.rhs : (term.rhs,)
             for instr in instrs
-                instr_applied = StatsModels.apply_schema(instr, sch, StatisticalModel)
+                instr_applied = StatsModels.apply_schema(instr, sch, LPSchemaContext)
                 push!(instr_terms, instr_applied)
             end
         else
             # Regular exogenous term
-            term_applied = StatsModels.apply_schema(term, sch, StatisticalModel)
+            term_applied = StatsModels.apply_schema(term, sch, LPSchemaContext)
             push!(exo_terms, term_applied)
         end
     end
