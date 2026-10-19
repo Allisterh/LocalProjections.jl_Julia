@@ -4,7 +4,7 @@
 
 using TestItems
 
-@testitem "as_irf_result basic construction" tags=[:met, :smoke] begin
+@testitem "as_irf_result basic construction" tags = [:met, :smoke] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -29,7 +29,7 @@ using TestItems
     @test irf_result.data isa AxisArray
 end
 
-@testitem "as_irf_result data dimensions" tags=[:met, :smoke] begin
+@testitem "as_irf_result data dimensions" tags = [:met, :smoke] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -60,7 +60,7 @@ end
     @test AxisArrays.axisvalues(horizon_axis)[1] == collect(0:10)
 end
 
-@testitem "as_irf_result with vcov_estimator" tags=[:met] begin
+@testitem "as_irf_result with vcov_estimator" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -99,7 +99,7 @@ end
     end
 end
 
-@testitem "as_irf_result custom coverage" tags=[:met] begin
+@testitem "as_irf_result custom coverage" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -115,16 +115,18 @@ end
     lp_result = lp(@formula(leads(y) ~ x), df; horizon = 3)
 
     # Custom coverage levels
-    irf_result = as_irf_result(lp_result;
+    irf_result = as_irf_result(
+        lp_result;
         vcov_estimator = HC1(),
-        coverage = [0.50, 0.99])
+        coverage = [0.5, 0.99]
+    )
 
-    @test irf_result.coverage == [0.50, 0.99]
+    @test irf_result.coverage == [0.5, 0.99]
     @test length(irf_result.lower) == 2
     @test length(irf_result.upper) == 2
 end
 
-@testitem "as_irf_result accessor functions" tags=[:met, :smoke] begin
+@testitem "as_irf_result accessor functions" tags = [:met, :smoke] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -152,10 +154,10 @@ end
     # Test bounds accessors
     @test length(MacroEconometricTools.lowerbounds(irf_result)) == 3
     @test length(MacroEconometricTools.upperbounds(irf_result)) == 3
-    @test MacroEconometricTools.coverages(irf_result) == [0.68, 0.90, 0.95]
+    @test MacroEconometricTools.coverages(irf_result) == [0.68, 0.9, 0.95]
 end
 
-@testitem "as_irf_result without vcov (zeros for stderr/bounds)" tags=[:met] begin
+@testitem "as_irf_result without vcov (zeros for stderr/bounds)" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -184,7 +186,7 @@ end
     end
 end
 
-@testitem "as_irf_result custom term" tags=[:met] begin
+@testitem "as_irf_result custom term" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -214,7 +216,7 @@ end
     @test vec(Array(irf_x2.data)) ≈ coef_x2
 end
 
-@testitem "as_irf_result metadata preservation" tags=[:met] begin
+@testitem "as_irf_result metadata preservation" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -236,7 +238,7 @@ end
     @test irf_result.metadata.term == :x
 end
 
-@testitem "as_irf_result with IV local projection" tags=[:met, :iv] begin
+@testitem "as_irf_result with IV local projection" tags = [:met, :iv] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -269,7 +271,7 @@ end
     @test pe === irf_result.data
 end
 
-@testitem "as_irf_result IV with custom coverage" tags=[:met, :iv] begin
+@testitem "as_irf_result IV with custom coverage" tags = [:met, :iv] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
@@ -286,11 +288,13 @@ end
 
     result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
-    irf_result = as_irf_result(result;
+    irf_result = as_irf_result(
+        result;
         vcov_estimator = HC1(),
-        coverage = [0.80])
+        coverage = [0.8]
+    )
 
-    @test irf_result.coverage == [0.80]
+    @test irf_result.coverage == [0.8]
     @test length(irf_result.lower) == 1
     @test length(irf_result.upper) == 1
 end
