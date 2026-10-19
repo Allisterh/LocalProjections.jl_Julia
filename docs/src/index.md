@@ -33,12 +33,12 @@ lp_result = lp(@formula(leads(y) ~ x), df; horizon=12)
 # Get impulse response
 irf = coefpath(lp_result)
 
-# Robust inference
-cov = vcov(HC1(), lp_result)
-se = stderror(cov; term=:x)
+# Standard errors (HC1 by default; HAC via `+ vcov(...)`)
+se = stderror(lp_result)
+lp_hac = lp_result + vcov(Bartlett{NeweyWest}())
 
 # Summary table
-summarize(lp_result, cov)
+summarize(lp_hac)
 ```
 
 ## Tutorials

@@ -157,12 +157,12 @@ end
     @test MacroEconometricTools.coverages(irf_result) == [0.68, 0.9, 0.95]
 end
 
-@testitem "as_irf_result without vcov (zeros for stderr/bounds)" tags = [:met] begin
+@testitem "as_irf_result uses the stored vcov estimator" tags = [:met] begin
     using LocalProjections
     using MacroEconometricTools
     using DataFrames
     using StatsModels
-    using AxisArrays
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
 
     n = 100
     df = DataFrame(
@@ -171,19 +171,18 @@ end
     )
 
     lp_result = lp(@formula(leads(y) ~ x), df; horizon = 3)
+    lp_hac = lp_result + vcov(Bartlett{NeweyWest}())
 
-    # No vcov_estimator - should have zero stderr
-    irf_result = as_irf_result(lp_result)
+    # Without `vcov_estimator`, standard errors come from the result itself
+    irf_default = as_irf_result(lp_result)
+    @test vec(Array(irf_default.stderr)) == stderror(lp_result)
+    @test all(>(0), Array(irf_default.stderr))
+    irf_hac = as_irf_result(lp_hac)
+    @test vec(Array(irf_hac.stderr)) == stderror(lp_hac)
 
-    @test all(Array(irf_result.stderr) .== 0.0)
-
-    # Bounds should also be zeros
-    for lb in irf_result.lower
-        @test all(Array(lb) .== 0.0)
-    end
-    for ub in irf_result.upper
-        @test all(Array(ub) .== 0.0)
-    end
+    # An explicit estimator overrides the stored one
+    irf_override = as_irf_result(lp_hac; vcov_estimator = HC1())
+    @test vec(Array(irf_override.stderr)) ≈ stderror(lp_result)
 end
 
 @testitem "as_irf_result custom term" tags = [:met] begin

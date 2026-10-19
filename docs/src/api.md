@@ -5,8 +5,7 @@
 ```@docs
 lp
 coefpath
-vcov(::Any, ::LocalProjections.LocalProjection)
-stderror(::LocalProjections.LocalProjectionCovariance)
+stderror(::AbstractLocalProjection)
 summarize
 ```
 
@@ -14,7 +13,6 @@ summarize
 
 ```@docs
 LocalProjection
-LocalProjectionCovariance
 ```
 
 ## Transformation Terms

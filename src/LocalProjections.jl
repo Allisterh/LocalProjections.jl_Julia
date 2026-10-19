@@ -1,6 +1,6 @@
 module LocalProjections
 
-export AbstractLocalProjection, LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
+export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
@@ -21,7 +21,7 @@ using Statistics: quantile
 using Distributions: Normal
 using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
-using StatsBase: StatsBase, StatisticalModel, coef, nobs, response
+using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
 
@@ -552,6 +552,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Formula:    $(lp.base_formula)")
     println(io, "  Coef names: $(lp.coef_names)")
     println(io, "  Sample:     $(lp.sample)")
+    println(io, "  Vcov:       $(repr(_vcov_estimator(lp)))")
     return println(io, "  Obs (h=0:$(lp.horizon)): $(join(nobs(lp), ", "))")
 end
 
@@ -591,17 +592,6 @@ function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEs
         lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
         lp.tautological_h0, lp.sample
     )
-end
-
-"""
-    LocalProjectionCovariance
-
-Diagonal covariance entries term-by-term across horizons.
-"""
-struct LocalProjectionCovariance{E}
-    estimator::E
-    variances::Dict{Symbol, Vector{Float64}}
-    horizon::Int
 end
 
 """
@@ -1076,18 +1066,6 @@ function lp(
 end
 
 """
-    stderror(cov; term)
-
-Standard errors across horizons for `term`.
-"""
-function stderror(cov::LocalProjectionCovariance; term::Symbol)
-    variances = get(cov.variances, term) do
-        throw(ArgumentError("term $term not found in covariance object"))
-    end
-    return sqrt.(variances)
-end
-
-"""
     IRFSummary
 
 Summary of impulse response function with coefficients, standard errors,
@@ -1210,6 +1188,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Instruments:  $(lpiv.instrument_names)")
     println(io, "  Coef names:   $(lpiv.coef_names)")
     println(io, "  Sample:       $(lpiv.sample)")
+    println(io, "  Vcov:         $(repr(_vcov_estimator(lpiv)))")
     return println(io, "  Obs (h=0:$(lpiv.horizon)): $(join(nobs(lpiv), ", "))")
 end
 
@@ -1420,24 +1399,22 @@ end
 # Shared methods for LocalProjection and LocalProjectionIV
 # ============================================================================
 
-"""
-    coefpath(lp; term = lp.shock)
+function _term_index(lp::AbstractLocalProjection, term::Symbol)
+    idx = findfirst(==(String(term)), lp.coef_names)
+    idx === nothing && throw(ArgumentError("term $term not present in model"))
+    return idx
+end
 
-Collect the coefficient path across horizons for `term`.
-Works for both `LocalProjection` and `LocalProjectionIV`.
+"""
+    coefpath(lp; term = lp.shock) -> Vector{Float64}
+
+Coefficient of `term` across horizons; element `h + 1` belongs to horizon `h`.
+When the response is the shock, the value at `h = 0` is exactly 1 for the shock and 0
+for every other term.
 """
 function coefpath(lp::AbstractLocalProjection; term::Symbol = lp.shock)
-    n = lp.horizon + 1
-    names = lp.coef_names
-    idx = findfirst(==(String(term)), names)
-    idx === nothing &&
-        throw(ArgumentError("term $term not present in model"))
-    coefficients = Vector{Float64}(undef, n)
-    for (i, model) in enumerate(lp.models)
-        coefficients[i] = coef(model)[idx]
-    end
-    # At h=0 when response == shock, the coefficient is known exactly:
-    # 1.0 for the shock term, 0.0 for all others
+    idx = _term_index(lp, term)
+    coefficients = [coef(horizonmodel(lp, h))[idx] for h in 0:lp.horizon]
     if lp.tautological_h0
         coefficients[1] = term === lp.shock ? 1.0 : 0.0
     end
@@ -1445,53 +1422,53 @@ function coefpath(lp::AbstractLocalProjection; term::Symbol = lp.shock)
 end
 
 """
-    vcov(estimator, lp)
+    stderror(lp::AbstractLocalProjection; term = lp.shock) -> Vector{Float64}
 
-Compute diagonal covariance entries horizon-by-horizon using `estimator`
-from `CovarianceMatrices.jl`. Works for both `LocalProjection` and `LocalProjectionIV`.
+Standard errors of `term` across horizons; element `h + 1` belongs to horizon `h`.
+
+Each horizon uses the covariance estimator stored in its model: HC1 after [`lp`](@ref)
+or [`lpiv`](@ref), or the one applied with `lp + vcov(estimator)`. When the response is
+the shock, the standard error at `h = 0` is exactly 0 (see [`coefpath`](@ref)).
+
+# Example
+```julia
+r = lp(@formula(leads(y) ~ x), df; horizon = 8)
+stderror(r)                                  # HC1
+stderror(r + vcov(Bartlett{NeweyWest}()))    # HAC
+```
 """
-function vcov(estimator, lp::AbstractLocalProjection)
-    n = lp.horizon + 1
-    variances = Dict{Symbol, Vector{Float64}}()
-    names = Symbol.(lp.coef_names)
-
-    for (i, model) in enumerate(lp.models)
-        # At h=0 when response == shock, all coefficients are known exactly (variance = 0)
-        if i == 1 && lp.tautological_h0
-            for name in names
-                vec = get!(variances, name) do
-                    fill(NaN, n)
-                end
-                vec[1] = 0.0
-            end
-            continue
-        end
-        cov = CovarianceMatrices.vcov(estimator, model)
-        for (j, name) in enumerate(names)
-            vec = get!(variances, name) do
-                fill(NaN, n)
-            end
-            vec[i] = cov[j, j]
-        end
+function StatsBase.stderror(lp::AbstractLocalProjection; term::Symbol = lp.shock)
+    idx = _term_index(lp, term)
+    se = [stderror(horizonmodel(lp, h))[idx] for h in 0:lp.horizon]
+    if lp.tautological_h0
+        se[1] = 0.0
     end
-
-    return LocalProjectionCovariance(estimator, variances, lp.horizon)
+    return se
 end
 
-"""
-    summarize(lp, cov; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
+# Every horizon model carries the same estimator: `lp` fits all horizons with the
+# default and `lp + vcov(estimator)` replaces it on all of them.
+_vcov_estimator(lp::AbstractLocalProjection) = horizonmodel(lp, 0).vcov_estimator
 
-Create a summary table of impulse response coefficients with standard errors
-and confidence intervals. Works for both `LocalProjection` and `LocalProjectionIV`.
+"""
+    summarize(lp; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
+    summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
+
+Table of the impulse response of `term` with standard errors and `level` confidence
+intervals, all multiplied by `scale`.
+
+Standard errors come from the covariance estimator stored in `lp` (see
+[`stderror`](@ref)). Passing a CovarianceMatrices.jl `estimator` is the same as
+`summarize(lp + vcov(estimator); ...)`.
 """
 function summarize(
-        lp::AbstractLocalProjection, cov::LocalProjectionCovariance;
+        lp::AbstractLocalProjection;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
     )
     level_f = Float64(level)
     scale_f = Float64(scale)
     beta = coefpath(lp; term = term) .* scale_f
-    se = stderror(cov; term = term) .* scale_f
+    se = stderror(lp; term = term) .* scale_f
     z = quantile(Normal(), 0.5 + level_f / 2)
     lower = beta .- z .* se
     upper = beta .+ z .* se
@@ -1502,18 +1479,12 @@ function summarize(
     )
 end
 
-"""
-    summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
-
-Convenience method that computes vcov internally before creating summary table.
-"""
 function summarize(
         lp::AbstractLocalProjection,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
+        kwargs...
     )
-    cov = vcov(estimator, lp)
-    return summarize(lp, cov; term = term, level = level, scale = scale)
+    return summarize(lp + vcov(estimator); kwargs...)
 end
 
 # ============================================================================
@@ -1521,7 +1492,8 @@ end
 # ============================================================================
 
 """
-    irfplot(lp, estimator_or_cov; term=lp.shock, levels=[0.95])
+    irfplot(lp; term=lp.shock, levels=[0.95])
+    irfplot(lp, estimator; term=lp.shock, levels=[0.95])
 
 Plot impulse response function from a local projection. Requires Makie.
 
@@ -1529,14 +1501,14 @@ Creates a line plot with confidence bands.
 
 # Arguments
 - `lp::Union{LocalProjection, LocalProjectionIV}`: estimated local projection
-- `estimator_or_cov`: a `CovarianceMatrices` estimator or `LocalProjectionCovariance`
+- `estimator`: a `CovarianceMatrices` estimator; defaults to the one stored in `lp`
 - `term::Symbol`: which coefficient to plot (default: shock variable)
 - `levels::Vector{Float64}`: confidence levels for bands (default: `[0.95]`)
 """
 # irfplot and irfplot! are imported from MacroEconometricTools (hub) — methods added by Makie extension
 
 """
-    irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
+    irfplot_axis(subfig, lp[, estimator]; kwargs...)
 
 Create an `Axis` with an IRF plot in the given sub-figure position. Requires Makie.
 
@@ -1551,24 +1523,22 @@ function irfplot_axis end
 """
     IRFPlot
 
-Internal wrapper type for dispatching plot recipes on LocalProjection/LocalProjectionIV
-with covariance. Users should call `plot(lp, cov; ...)` or `plot(lp, estimator; ...)` directly.
+Internal wrapper type for dispatching plot recipes on LocalProjection/LocalProjectionIV.
+Users should call `plot(lp; ...)` or `plot(lp, estimator; ...)` directly.
 """
-struct IRFPlot{L <: AbstractLocalProjection, E}
+struct IRFPlot{L <: AbstractLocalProjection}
     lp::L
-    cov::LocalProjectionCovariance{E}
     term::Symbol
     levels::Vector{Float64}
 end
 
 @recipe function f(wrapper::IRFPlot)
     lp = wrapper.lp
-    cov = wrapper.cov
     term = wrapper.term
     levels = wrapper.levels
 
     beta = coefpath(lp; term = term)
-    se = stderror(cov; term = term)
+    se = stderror(lp; term = term)
     horizons = collect(0:lp.horizon)
 
     sorted_levels = sort(levels; rev = true)
@@ -1605,11 +1575,8 @@ end
     return horizons, beta
 end
 
-@recipe function f(
-        lp::AbstractLocalProjection, cov::LocalProjectionCovariance;
-        term = lp.shock, levels = [0.95]
-    )
-    IRFPlot(lp, cov, term, Float64.(levels))
+@recipe function f(lp::AbstractLocalProjection; term = lp.shock, levels = [0.95])
+    IRFPlot(lp, term, Float64.(levels))
 end
 
 @recipe function f(
@@ -1617,8 +1584,7 @@ end
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term = lp.shock, levels = [0.95]
     )
-    cov = vcov(estimator, lp)
-    IRFPlot(lp, cov, term, Float64.(levels))
+    IRFPlot(lp + vcov(estimator), term, Float64.(levels))
 end
 
 # ============================================================================
@@ -1635,7 +1601,8 @@ For IV results, first-stage diagnostics are included in metadata.
 
 # Keyword Arguments
 - `term::Symbol=lp.shock`: Which coefficient to extract (defaults to shock variable)
-- `vcov_estimator=nothing`: Covariance estimator for confidence bands (e.g., `HR1()`)
+- `vcov_estimator=nothing`: Covariance estimator for standard errors and bands (e.g.,
+  `HR1()`); `nothing` uses the estimator stored in `lp` (see [`stderror`](@ref))
 - `coverage::Vector{Float64}=[0.68, 0.90, 0.95]`: Confidence levels for bands
 
 # Returns
@@ -1677,45 +1644,33 @@ function as_irf_result(
         Axis{:horizon}(horizons)
     )
 
-    if vcov_estimator !== nothing
-        cov = vcov(vcov_estimator, lp)
-        se = stderror(cov; term = term)
+    se = stderror(vcov_estimator === nothing ? lp : lp + vcov(vcov_estimator); term = term)
 
-        stderr_arr = AxisArray(
-            reshape(se, 1, 1, H),
+    stderr_arr = AxisArray(
+        reshape(se, 1, 1, H),
+        Axis{:response}([lp.response]),
+        Axis{:shock}([term]),
+        Axis{:horizon}(horizons)
+    )
+
+    # Compute confidence bands as AxisArrays
+    lower = [
+        AxisArray(
+            reshape(beta .- quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
             Axis{:response}([lp.response]),
             Axis{:shock}([term]),
             Axis{:horizon}(horizons)
-        )
+        ) for c in coverage
+    ]
 
-        # Compute confidence bands as AxisArrays
-        lower = [
-            AxisArray(
-                reshape(beta .- quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
-                Axis{:response}([lp.response]),
-                Axis{:shock}([term]),
-                Axis{:horizon}(horizons)
-            ) for c in coverage
-        ]
-
-        upper = [
-            AxisArray(
-                reshape(beta .+ quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
-                Axis{:response}([lp.response]),
-                Axis{:shock}([term]),
-                Axis{:horizon}(horizons)
-            ) for c in coverage
-        ]
-    else
-        stderr_arr = AxisArray(
-            zeros(T, 1, 1, H),
+    upper = [
+        AxisArray(
+            reshape(beta .+ quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
             Axis{:response}([lp.response]),
             Axis{:shock}([term]),
             Axis{:horizon}(horizons)
-        )
-        lower = [copy(stderr_arr) for _ in coverage]
-        upper = [copy(stderr_arr) for _ in coverage]
-    end
+        ) for c in coverage
+    ]
 
     # Build metadata, adding IV-specific fields when applicable
     meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)

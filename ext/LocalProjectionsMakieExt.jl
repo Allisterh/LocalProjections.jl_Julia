@@ -2,8 +2,7 @@ module LocalProjectionsMakieExt
 
 using Makie
 using LocalProjections
-using LocalProjections: AbstractLocalProjection, LocalProjectionCovariance,
-    coefpath, stderror, vcov
+using LocalProjections: AbstractLocalProjection, coefpath, stderror, vcov
 using CovarianceMatrices
 using Distributions: Normal, quantile
 
@@ -13,7 +12,7 @@ import LocalProjections: irfplot, irfplot!, irfplot_axis
 # IRFPlotMakie Recipe
 # ============================================================================
 
-Makie.@recipe(IRFPlotMakie, lp, estimator_or_cov) do scene
+Makie.@recipe(IRFPlotMakie, lp) do scene
     Makie.Theme(;
         term = Makie.automatic,
         levels = [0.95],
@@ -29,7 +28,6 @@ end
 
 function Makie.plot!(plot::IRFPlotMakie)
     lp = plot[1][]
-    est = plot[2][]
 
     term_val = plot.term[]
     term = term_val === Makie.automatic ? lp.shock : term_val
@@ -42,15 +40,8 @@ function Makie.plot!(plot::IRFPlotMakie)
     linewidth = plot.linewidth[]
     xtickstep = plot.xtickstep[]
 
-    # Get covariance (convert estimator if needed)
-    cov = if est isa LocalProjectionCovariance
-        est
-    else
-        vcov(est, lp)
-    end
-
     beta = coefpath(lp; term = term)
-    se = stderror(cov; term = term)
+    se = stderror(lp; term = term)
     horizons = collect(0:lp.horizon)
 
     sorted_levels = sort(Float64.(levels); rev = true)
@@ -83,10 +74,18 @@ end
 # Convenience wrappers mapping irfplot/irfplot! to irfplotmakie/irfplotmakie!
 # ============================================================================
 
-irfplot(lp::AbstractLocalProjection, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
-irfplot!(ax, lp::AbstractLocalProjection, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
+irfplot(lp::AbstractLocalProjection; kwargs...) = irfplotmakie(lp; kwargs...)
+irfplot(lp::AbstractLocalProjection, est; kwargs...) = irfplotmakie(lp + vcov(est); kwargs...)
+irfplot!(ax, lp::AbstractLocalProjection; kwargs...) = irfplotmakie!(ax, lp; kwargs...)
+function irfplot!(ax, lp::AbstractLocalProjection, est; kwargs...)
+    return irfplotmakie!(ax, lp + vcov(est); kwargs...)
+end
 
-function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
+function irfplot_axis(subfig, lp, est; kwargs...)
+    return irfplot_axis(subfig, lp + vcov(est); kwargs...)
+end
+
+function irfplot_axis(subfig, lp; kwargs...)
     kw = Dict{Symbol, Any}(kwargs)
     term = get(kw, :term, lp.shock)
     title = pop!(kw, :title, "")
@@ -101,7 +100,7 @@ function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
         xticks = xticks_val
     )
     Makie.xlims!(ax, horizons[1] - 0.4, horizons[end] + 0.4)
-    p = irfplotmakie!(ax, lp, estimator_or_cov; kw...)
+    p = irfplotmakie!(ax, lp; kw...)
     return (subfig, ax, p)
 end
 

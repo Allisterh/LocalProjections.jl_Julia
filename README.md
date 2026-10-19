@@ -26,15 +26,15 @@ df = DataFrame(y = y, shock = shock)
 # The coefficient β at each horizon h gives the impulse response
 lp_result = lp(@formula(leads(y) ~ shock), df; horizon=20)
 
-# Compute HAC-robust standard errors (Newey-West)
-cov_result = vcov(Bartlett{NeweyWest}(), lp_result)
+# Use HAC-robust standard errors (Newey-West); the default is HC1
+lp_result = lp_result + vcov(Bartlett{NeweyWest}())
 
 # Extract the impulse response function
 irf = coefpath(lp_result; term=:shock)
-se = stderror(cov_result; term=:shock)
+se = stderror(lp_result; term=:shock)
 
 # Plot IRF with 95% confidence bands
-plot(lp_result, cov_result; term=:shock, levels=[0.95])
+plot(lp_result; term=:shock, levels=[0.95])
 ```
 
 ## License

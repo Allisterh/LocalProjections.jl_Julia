@@ -319,10 +319,9 @@ end
     n = 100
     df = DataFrame(x = randn(n), y = randn(n))
     lp_result = lp(@formula(leads(y) ~ x), df; horizon = 5)
-    cov = LocalProjections.vcov(HC1(), lp_result)
 
     # Test basic summarize returns IRFSummary
-    summary_obj = summarize(lp_result, cov)
+    summary_obj = summarize(lp_result)
     @test summary_obj isa IRFSummary
     @test length(summary_obj.horizon) == 6  # horizons 0-5
     @test summary_obj.horizon == collect(0:5)
@@ -336,13 +335,15 @@ end
     @test names(summary_df) == ["horizon", "coef", "se", "lower", "upper"]
 
     # Test with scale
-    summary_scaled = summarize(lp_result, cov; scale = 100)
+    summary_scaled = summarize(lp_result; scale = 100)
     @test summary_scaled.coef ≈ summary_obj.coef .* 100
     @test summary_scaled.scale == 100.0
 
-    # Test with estimator directly
+    # Default standard errors are the stored HC1 ones; an explicit HC1 matches
+    @test summary_obj.se == stderror(lp_result)
     summary_direct = summarize(lp_result, HC1())
     @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
+    @test summary_direct.se ≈ summary_obj.se
 
     # Test confidence bounds are sensible (lower < coef < upper when se > 0)
     for i in 1:length(summary_obj.horizon)
@@ -352,7 +353,7 @@ end
     end
 
     # Test different confidence level
-    summary_90 = summarize(lp_result, cov; level = 0.9)
+    summary_90 = summarize(lp_result; level = 0.9)
     @test summary_90.level == 0.9
     # 90% CI should be narrower than 95% CI
     @test all(
@@ -365,7 +366,6 @@ end
     using LocalProjections: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
 
     n = 100
     df = DataFrame(x = randn(n), y = randn(n))
@@ -394,6 +394,40 @@ end
     lp_chained = (lp_result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
     @test lp_chained isa LocalProjection
     @test coefpath(lp_chained) == coefpath(lp_result)
+end
+
+@testitem "stored vcov estimator drives inference" tags = [:vcov, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StableRNGs, Test
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
+    import Regress
+
+    rng = StableRNG(4242)
+    n = 200
+    df = DataFrame(x = randn(rng, n), w = randn(rng, n), y = randn(rng, n))
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = 4)
+    hac = Bartlett{NeweyWest}()
+    r_hac = r + vcov(hac)
+
+    # The generics are shared with Regress, so loading both is unambiguous
+    @test vcov === Regress.vcov
+    @test stderror === Regress.stderror
+
+    # stderror(lp; term) collects each horizon model's stored standard errors
+    k = findfirst(==("w"), coefnames(r))
+    @test stderror(r) == [stderror(horizonmodel(r, h))[2] for h in 0:4]
+    @test stderror(r_hac; term = :w) == [stderror(horizonmodel(r_hac, h))[k] for h in 0:4]
+    @test stderror(r_hac) != stderror(r)
+    @test_throws "term z not present in model" stderror(r; term = :z)
+
+    # Downstream functions default to the stored estimator
+    @test summarize(r_hac).se == stderror(r_hac)
+    @test summarize(r_hac).se ≈ summarize(r, hac).se
+    @test summarize(r_hac, HC1()).se ≈ summarize(r).se
+
+    # `show` reports the stored estimator
+    @test occursin("Vcov:       HR1()", sprint(show, MIME"text/plain"(), r))
+    @test occursin("Bartlett{NeweyWest}()", sprint(show, MIME"text/plain"(), r_hac))
 end
 
 @testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin
@@ -448,10 +482,8 @@ end
     all_fs = first_stage(result)
     @test length(all_fs) == horizon + 1
 
-    # Test vcov
-    cov = LocalProjections.vcov(HC1(), result)
-    @test cov isa LocalProjectionCovariance
-    se = stderror(cov; term = :x)
+    # Standard errors across horizons
+    se = stderror(result; term = :x)
     @test length(se) == horizon + 1
     @test all(se .> 0)  # Standard errors should be positive
 end
@@ -498,7 +530,6 @@ end
     using LocalProjections: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
     using Random
     using LinearAlgebra
 
@@ -587,10 +618,9 @@ end
     df = DataFrame(y = y, x = x, z = z)
 
     result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
-    cov = LocalProjections.vcov(HC1(), result)
 
     # Test summarize
-    summary_obj = summarize(result, cov)
+    summary_obj = summarize(result)
     @test summary_obj isa IRFSummary
     @test length(summary_obj.horizon) == 4  # 0-3
     @test summary_obj.term == :x
@@ -601,12 +631,13 @@ end
     @test nrow(summary_df) == 4
 
     # Test with scale
-    summary_scaled = summarize(result, cov; scale = 100)
+    summary_scaled = summarize(result; scale = 100)
     @test summary_scaled.coef ≈ summary_obj.coef .* 100
 
     # Test with estimator directly
     summary_direct = summarize(result, HC1())
     @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
+    @test summary_direct.se ≈ summary_obj.se
 end
 
 @testitem "lpiv comparison with manual 2SLS" tags = [:lpiv, :iv, :verification] begin
@@ -757,11 +788,11 @@ end
     irf_w = coefpath(result; term = :w)
     @test irf_w[1] == 0.0
 
-    # vcov: h=0 variance should be 0.0
-    cov = vcov(HC1(), result)
-    se = stderror(cov; term = :x)
+    # stderror: h=0 standard error is exactly 0, also after changing the estimator
+    se = stderror(result; term = :x)
     @test se[1] == 0.0
     @test all(isfinite, se[2:end])
+    @test stderror(result + vcov(HC1()); term = :w)[1] == 0.0
 
     # summarize: should not error
     summary = summarize(result, HC1())
@@ -871,7 +902,6 @@ end
     using LocalProjections
     using DataFrames, StatsModels, StatsBase, Tables, Test
     using CovarianceMatrices: HC1
-    using Regress: vcov
     using StableRNGs
 
     rng = StableRNG(20261020)

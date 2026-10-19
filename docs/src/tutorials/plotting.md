@@ -4,7 +4,7 @@ LocalProjections.jl supports two plotting backends: **Plots.jl** (via RecipesBas
 
 ## Setup
 
-All examples below assume you have estimated a local projection and have a variance estimator ready:
+All examples below assume you have estimated a local projection. Plots use the covariance estimator stored in the result (HC1 unless changed with `lp_result + vcov(estimator)`); passing an estimator as the second argument overrides it.
 
 ```julia
 using LocalProjections, DataFrames, StatsModels, CovarianceMatrices
@@ -22,14 +22,9 @@ Plots.jl integration works out of the box via RecipesBase recipes.
 ```julia
 using Plots
 
-plot(lp_result, HC1())
-```
-
-You can pass a pre-computed covariance object instead of an estimator:
-
-```julia
-cov_result = vcov(HC1(), lp_result)
-plot(lp_result, cov_result)
+plot(lp_result)                                 # stored estimator
+plot(lp_result + vcov(Bartlett{NeweyWest}()))   # HAC
+plot(lp_result, HC3())                          # override
 ```
 
 ### Customization
