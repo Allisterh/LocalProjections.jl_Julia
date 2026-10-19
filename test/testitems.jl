@@ -417,7 +417,7 @@ end
 
     # Fit IV local projection
     horizon = 3
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
 
     # Check struct type
     @test result isa LocalProjectionIV
@@ -476,7 +476,7 @@ end
 
     # Fit IV LP with control
     horizon = 2
-    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
 
@@ -512,7 +512,7 @@ end
 
     df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
     # Test + vcov() syntax
     result_hac = result + vcov(Bartlett{NeweyWest}())
@@ -554,7 +554,7 @@ end
 
     # Cumulative IV local projection
     horizon = 2
-    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
     @test result.response == :y
@@ -586,7 +586,7 @@ end
 
     df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
     cov = LocalProjections.vcov(HC1(), result)
 
     # Test summarize
@@ -627,7 +627,7 @@ end
     df = DataFrame(y = y, x = x, z = z)
 
     # lpiv result for horizon 0
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 0)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 0)
     lpiv_coef = coefpath(result; term = :x)[1]
 
     # Manual 2SLS for comparison
@@ -661,7 +661,7 @@ end
     df = DataFrame(y = y, x = x, z = z, z2 = z2, z3 = z3)
 
     horizon = 4
-    result = lpiv(@formula(leads(y) ~ (x ~ z + z2 + z3)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z + z2 + z3)), df; horizon = horizon)
 
     # Test single-horizon call
     r0 = weakivtest(result, 0)
@@ -710,6 +710,7 @@ end
     # This should not error — lags(w1, 2) and lags(w2, 2) reference columns
     # :w1 and :w2 which are not the response variable :y
     result = lpiv(
+        TSLS(),
         @formula(leads(y) ~ (x ~ z) + lags(w1, 2) + lags(w2, 2)),
         df; horizon = horizon
     )
@@ -742,7 +743,7 @@ end
     horizon = 4
 
     # IV LP where response == shock (x is both response and endogenous)
-    result = lpiv(@formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
     @test result.tautological_h0
@@ -790,6 +791,78 @@ end
     @test irf_ols[1] == 1.0
 
     # Non-tautological case: response != shock
-    result_ok = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
+    result_ok = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
     @test !result_ok.tautological_h0
+end
+
+@testitem "shock selection and formula validation" tags = [:core, :lpiv, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using StableRNGs
+
+    rng = StableRNG(20261019)
+    n = 120
+    df = DataFrame(
+        y = randn(rng, n), x = randn(rng, n), w = randn(rng, n), z = randn(rng, n)
+    )
+
+    @test lp(@formula(leads(y) ~ x), df; horizon = 1) isa AbstractLocalProjection
+    @test lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1) isa
+        AbstractLocalProjection
+
+    # Default shock: first regressor other than the intercept, chosen by name
+    @test lp(@formula(leads(y) ~ w + x), df; horizon = 1).shock == :w
+    r0 = lp(@formula(leads(y) ~ 0 + x + w), df; horizon = 1)
+    @test r0.shock == :x
+    @test r0.coef_names == ["x", "w"]
+    @test lp(@formula(leads(y) ~ 0 + x), df; horizon = 1).shock == :x
+
+    # IV default shock: first endogenous variable, wherever it appears
+    @test lpiv(TSLS(), @formula(leads(y) ~ w + (x ~ z)), df; horizon = 1).shock == :x
+    riv0 = lpiv(TSLS(), @formula(leads(y) ~ 0 + (x ~ z)), df; horizon = 1)
+    @test riv0.shock == :x
+    @test riv0.coef_names == ["x"]
+
+    # Explicit shock
+    @test lp(@formula(leads(y) ~ x + w), df; horizon = 1, shock = :w).shock == :w
+    @test lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = 1, shock = :w).shock ==
+        :w
+
+    # Unknown shock: same message for OLS and IV
+    msg = "shock `nope` is not a coefficient of the model; available coefficients: (Intercept), x"
+    @test_throws msg lp(@formula(leads(y) ~ x), df; horizon = 1, shock = :nope)
+    @test_throws msg lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1, shock = :nope)
+
+    # The shock is validated before any horizon is fitted
+    df_nan = DataFrame(y = fill(NaN, n), x = df.x, z = df.z)
+    @test_throws "shock `nope`" lp(@formula(leads(y) ~ x), df_nan; horizon = 1, shock = :nope)
+    @test_throws "No complete observations available for horizon 0" lp(
+        @formula(leads(y) ~ x), df_nan; horizon = 1
+    )
+
+    # Response without a horizon transformation: same message for OLS and IV
+    msg = "the response must use leads(), cumul(), anchor(), or the y|z syntax"
+    @test_throws msg lp(@formula(y ~ x), df; horizon = 1)
+    @test_throws msg lpiv(TSLS(), @formula(y ~ (x ~ z)), df; horizon = 1)
+
+    @test_throws "horizon must be non-negative (got -1)" lp(@formula(leads(y) ~ x), df; horizon = -1)
+    @test_throws "horizon must be non-negative (got -1)" lpiv(
+        TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = -1
+    )
+
+    # OLS and IV formulas are not interchangeable
+    @test_throws "use `lpiv(TSLS(), formula, data; horizon)`" lp(
+        @formula(leads(y) ~ (x ~ z)), df; horizon = 1
+    )
+    @test_throws "lpiv requires an `(endogenous ~ instruments)` term" lpiv(
+        TSLS(), @formula(leads(y) ~ x), df; horizon = 1
+    )
+    @test_throws "Not enough instruments: 1 < 2" lpiv(
+        TSLS(), @formula(leads(y) ~ (x + w ~ z)), df; horizon = 1
+    )
+
+    # Estimators without a matrix-based Regress.iv method are rejected up front
+    @test_throws "Regress.jl has no matrix-based `iv` method for LIML" lpiv(
+        LocalProjections.Regress.LIML(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1
+    )
 end

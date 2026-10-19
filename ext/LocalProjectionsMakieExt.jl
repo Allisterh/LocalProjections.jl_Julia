@@ -2,7 +2,7 @@ module LocalProjectionsMakieExt
 
 using Makie
 using LocalProjections
-using LocalProjections: LPResult, LocalProjectionCovariance,
+using LocalProjections: AbstractLocalProjection, LocalProjectionCovariance,
     coefpath, stderror, vcov
 using CovarianceMatrices
 using Distributions: Normal, quantile
@@ -83,8 +83,8 @@ end
 # Convenience wrappers mapping irfplot/irfplot! to irfplotmakie/irfplotmakie!
 # ============================================================================
 
-irfplot(lp::LPResult, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
-irfplot!(ax, lp::LPResult, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
+irfplot(lp::AbstractLocalProjection, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
+irfplot!(ax, lp::AbstractLocalProjection, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
 
 function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
     kw = Dict{Symbol, Any}(kwargs)

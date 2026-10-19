@@ -1,7 +1,7 @@
 module LocalProjections
 
-export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
-export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
+export AbstractLocalProjection, LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
+export lp, lpiv, TSLS, coefpath, stderror, vcov, summarize, first_stage, weakivtest
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
@@ -14,6 +14,7 @@ using Tables: Tables
 using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, coefnames, term
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
+    AbstractIVEstimator,
     VcovSpec, WeakIVTestResult, FirstStageIV, lags, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices
 using Statistics: quantile, var
@@ -470,11 +471,20 @@ function StatsModels.apply_schema(
 end
 
 """
+    AbstractLocalProjection
+
+Supertype of local projection results: [`LocalProjection`](@ref) (OLS, from
+[`lp`](@ref)) and [`LocalProjectionIV`](@ref) (IV, from [`lpiv`](@ref)). Each holds
+one fitted Regress.jl model per horizon `0:horizon`.
+"""
+abstract type AbstractLocalProjection end
+
+"""
     LocalProjection
 
 Stack of horizon-specific OLS models produced by [`lp`](@ref).
 """
-struct LocalProjection{M <: OLSMatrixEstimator}
+struct LocalProjection{M <: OLSMatrixEstimator} <: AbstractLocalProjection
     models::Vector{M}
     horizon::Int
     response::Symbol
@@ -662,6 +672,7 @@ function _extract_base_variables(
     )
     return [t.sym]
 end
+_extract_base_variables(::ConstantTerm) = Symbol[]
 _extract_base_variables(t::CumulTerm) = _extract_base_variables(t.term)
 _extract_base_variables(t::LeadTerm) = _extract_base_variables(t.term)
 function _extract_base_variables(t::AnchorTerm)
@@ -715,164 +726,265 @@ function _extract_base_variables(t::StatsModels.InteractionTerm)
 end
 
 """
-    lp(formula, data; horizon, shock=nothing)
+    _split_rhs(rhs) -> (exo, ivs)
 
-Estimate local projections implied by `formula` up to the supplied `horizon`.
-`shock` selects the coefficient path of interest (defaults to the first RHS term).
+Split an unapplied formula RHS into exogenous terms and `(endogenous ~ instruments)` terms.
+"""
+function _split_rhs(rhs)
+    terms = rhs isa Tuple ? rhs : (rhs,)
+    exo = Any[t for t in terms if !(t isa FormulaTerm)]
+    ivs = FormulaTerm[t for t in terms if t isa FormulaTerm]
+    return exo, ivs
+end
+
+"""
+    _extract_all_vars_from_formula(formula::FormulaTerm) -> Vector{Symbol}
+
+Extract all variable symbols from formula, including those nested in IV specs.
+"""
+function _extract_all_vars_from_formula(formula::FormulaTerm)
+    all_vars = Symbol[]
+    append!(all_vars, StatsModels.termvars(formula.lhs))
+    exo, ivs = _split_rhs(formula.rhs)
+    for term in exo
+        append!(all_vars, StatsModels.termvars(term))
+    end
+    for term in ivs
+        append!(all_vars, StatsModels.termvars(term.lhs))
+        append!(all_vars, StatsModels.termvars(term.rhs))
+    end
+    return unique(all_vars)
+end
+
+"""
+    _response_variable(lhs) -> Symbol
+
+Name of the response variable, given the tuple returned by [`_unwrap_lhs`](@ref).
+"""
+function _response_variable(lhs)
+    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term = lhs
+    is_anchor && return _extract_single_response(anchor_term.response, "anchor() response term")
+    is_cumulative && return _extract_single_response(cumul_term, "cumul() term")
+    is_leads && return _extract_single_response(leads_term, "leads() term")
+    throw(
+        ArgumentError(
+            "the response must use leads(), cumul(), anchor(), or the y|z syntax, " *
+                "e.g. `leads(y) ~ x`"
+        )
+    )
+end
+
+"""
+    _float_columns(cols) -> Matrix{Float64}
+
+Convert model columns to a `Float64` matrix, mapping `missing` (from `lag`) to `NaN`.
+"""
+function _float_columns(cols)
+    M = map(v -> ismissing(v) ? NaN : Float64(v), cols)
+    return M isa AbstractMatrix ? Matrix{Float64}(M) : reshape(Vector{Float64}(M), :, 1)
+end
+
+"""
+    _term_columns(terms, data) -> (Matrix{Float64}, Vector{String})
+
+Columns and coefficient names of schema-applied `terms`, without an intercept.
+"""
+function _term_columns(terms, data)
+    names = String[]
+    cols = Matrix{Float64}[]
+    for t in terms
+        push!(cols, _float_columns(StatsModels.modelcols(t, data)))
+        n = StatsModels.coefnames(t)
+        append!(names, n isa AbstractVector ? n : [n])
+    end
+    isempty(cols) && return Matrix{Float64}(undef, nrow(data), 0), names
+    return reduce(hcat, cols)::Matrix{Float64}, names
+end
+
+"""
+    _select_shock(shock, coef_names, endo_names) -> Symbol
+
+Validate a user-supplied `shock`, or pick the default: the first endogenous regressor
+if there is one, otherwise the first coefficient other than the intercept.
+"""
+function _select_shock(shock, coef_names, endo_names)
+    if shock === nothing
+        candidates = isempty(endo_names) ? filter(!=("(Intercept)"), coef_names) : endo_names
+        isempty(candidates) && throw(
+            ArgumentError(
+                "cannot select a default shock: the model has no regressor besides the " *
+                    "intercept; add a regressor or pass `shock`"
+            )
+        )
+        return Symbol(first(candidates))
+    end
+    Symbol(shock) in Symbol.(coef_names) || throw(
+        ArgumentError(
+            "shock `$shock` is not a coefficient of the model; " *
+                "available coefficients: $(join(coef_names, ", "))"
+        )
+    )
+    return Symbol(shock)
+end
+
+"""
+    _lp_design(formula, data, horizon, shock, instrumented::Bool)
+
+Parse `formula` and build the matrices shared by every horizon of [`lp`](@ref) and
+[`lpiv`](@ref). `instrumented` states whether `(endogenous ~ instruments)` terms are
+required (`lpiv`) or forbidden (`lp`).
+
+Returns a `NamedTuple` with the regressor matrix `X = [exogenous endogenous]`, the
+instrument matrix `Z = [exogenous instruments]` (equal to `X` without instruments),
+coefficient, endogenous and instrument names, the response name, the unwrapped LHS,
+the complete-case data, and the validated shock.
+"""
+function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrumented::Bool)
+    horizon < 0 && throw(ArgumentError("horizon must be non-negative (got $horizon)"))
+    df_base = DataFrame(data)  # avoid mutating caller's data
+
+    exo_raw, iv_raw = _split_rhs(formula.rhs)
+    if instrumented
+        isempty(iv_raw) && throw(
+            ArgumentError(
+                "lpiv requires an `(endogenous ~ instruments)` term, e.g. `leads(y) ~ (x ~ z)`"
+            )
+        )
+    else
+        isempty(iv_raw) || throw(
+            ArgumentError(
+                "lp does not accept `(endogenous ~ instruments)` terms; " *
+                    "use `lpiv(TSLS(), formula, data; horizon)` for IV local projections"
+            )
+        )
+    end
+
+    # Treat every variable as continuous so numeric columns with few distinct values
+    # are not read as categorical.
+    all_vars = _extract_all_vars_from_formula(formula)
+    hints = Dict{Symbol, Any}(var => StatsModels.ContinuousTerm for var in all_vars)
+    sch = StatsModels.schema(formula, df_base, hints)
+
+    lhs = _unwrap_lhs(StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext))
+    response = _response_variable(lhs)
+
+    isempty(StatsModels.termvars(formula.rhs)) &&
+        throw(ArgumentError("formula must contain at least one regressor"))
+
+    # Complete cases in the untransformed variables
+    base_vars = _extract_base_variables(formula)
+    df_complete = dropmissing(df_base, base_vars, disallowmissing = true)
+
+    # Exogenous regressors, including the intercept unless the formula removes it
+    exo_rhs = isempty(exo_raw) ? ConstantTerm(1) : Tuple(exo_raw)
+    mf = StatsModels.ModelFrame(FormulaTerm(Term(response), exo_rhs), df_complete)
+    X_exo = _float_columns(StatsModels.modelcols(mf.f.rhs, mf.data))
+    exo_names = Vector{String}(coefnames(mf))
+
+    endo_terms = AbstractTerm[]
+    instr_terms = AbstractTerm[]
+    for t in iv_raw
+        for e in (t.lhs isa Tuple ? t.lhs : (t.lhs,))
+            push!(endo_terms, StatsModels.apply_schema(e, sch, LPSchemaContext))
+        end
+        for z in (t.rhs isa Tuple ? t.rhs : (t.rhs,))
+            push!(instr_terms, StatsModels.apply_schema(z, sch, LPSchemaContext))
+        end
+    end
+    X_endo, endo_names = _term_columns(endo_terms, df_complete)
+    Z_instr, instr_names = _term_columns(instr_terms, df_complete)
+    length(instr_names) >= length(endo_names) || throw(
+        ArgumentError(
+            "Not enough instruments: $(length(instr_names)) < $(length(endo_names)) " *
+                "(order condition violated)"
+        )
+    )
+
+    coef_names = vcat(exo_names, endo_names)
+    return (;
+        X = hcat(X_exo, X_endo)::Matrix{Float64},
+        Z = hcat(X_exo, Z_instr)::Matrix{Float64},
+        coef_names, endo_names, instr_names, response, lhs,
+        data = df_complete,
+        shock = _select_shock(shock, coef_names, endo_names),
+    )
+end
+
+_fit_horizon(::Nothing, X, Z, y, n_endogenous) = ols(X, y; has_intercept = false)
+function _fit_horizon(estimator, X, Z, y, n_endogenous)
+    return iv(
+        estimator, collect(Z), collect(X), collect(y);
+        has_intercept = false, n_endogenous
+    )
+end
+
+"""
+    _lp_estimate_horizons(estimator, X, Z, n_endogenous, lhs, data, horizon)
+
+Fit one model per horizon `0:horizon`: OLS when `estimator === nothing`, otherwise
+`Regress.iv(estimator, ...)`. Each horizon uses the rows where `X`, `Z` and the
+transformed response are all non-`NaN`.
+
+`X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
+abstract return types of StatsModels.
+"""
+function _lp_estimate_horizons(
+        estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
+        lhs, data, horizon::Integer
+    )
+    complete_xz = vec(all(!isnan, X, dims = 2)) .& vec(all(!isnan, Z, dims = 2))
+
+    function _estimate_horizon(h)
+        lhs_h = _build_lhs_for_horizon(h, lhs...)
+        # Vector{Float64}: modelcols may return a ShiftedArray
+        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, data))
+        rows = complete_xz .& .!isnan.(y_h)
+        any(rows) ||
+            throw(ArgumentError("No complete observations available for horizon $h"))
+        return _fit_horizon(
+            estimator, view(X, rows, :), view(Z, rows, :), view(y_h, rows), n_endogenous
+        )
+    end
+
+    first_model = _estimate_horizon(0)
+    models = Vector{typeof(first_model)}(undef, horizon + 1)
+    models[1] = first_model
+    for h in 1:horizon
+        models[h + 1] = _estimate_horizon(h)
+    end
+    return models
+end
+
+"""
+    lp(formula, data; horizon, shock=nothing) -> LocalProjection
+
+Estimate OLS local projections from horizon 0 to `horizon`, one regression per horizon.
+
+The response must be written with `leads(y)`, `cumul(y)`, `anchor(y, z)` or the pipe
+syntax `y|z`. `shock` names the coefficient whose path is reported by
+[`coefpath`](@ref) and [`summarize`](@ref); by default it is the first regressor other
+than the intercept. A `shock` that is not a coefficient of the model is an error.
+
+Each horizon is estimated on the rows where the regressors and the transformed response
+are available, so the sample shrinks as `h` grows.
+
+For instrumental variables, use [`lpiv`](@ref).
+
+# Example
+```julia
+result = lp(@formula(leads(y) ~ x + lags(w, 4)), df; horizon = 12)
+coefpath(result)            # path of `x`
+```
 """
 function lp(
         formula::FormulaTerm, data::AbstractDataFrame;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing
     )
-    horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
-    df_base = DataFrame(data)  # avoid mutating caller's data
-
-    # Apply schema to formula to convert FunctionTerms to proper terms (CumulTerm, LagTerm, etc.)
-    # Collect all variable names from the formula
-    all_vars = StatsModels.termvars(formula)
-
-    # Create hints to treat all variables as continuous (not categorical)
-    # This prevents StatsModels from treating numeric columns with many unique values as categorical
-    hints = Dict{Symbol, Any}(var => StatsModels.ContinuousTerm for var in all_vars)
-
-    sch = StatsModels.schema(formula, df_base, hints)
-    lhs_term = StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext)
-    rhs_term = StatsModels.apply_schema(formula.rhs, sch, LPSchemaContext)
-
-    # Check if LHS is a CumulTerm (cumulative impulse response), LeadTerm (forward-looking), or AnchorTerm (anchored)
-    # Note: AnchorTerm can contain LeadTerm or CumulTerm inside (from pipe syntax like leads(y)|z or cumul(y)|z)
-    # If AnchorTerm contains plain term (y|z), default to leads behavior
-    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term = _unwrap_lhs(lhs_term)
-
-    # Extract response variable/data
-    # For cumulative/leads/anchor cases, we need to extract the base variable names for Stage 1 filtering
-    # but we'll evaluate the transformed term for actual calculation
-    response = if is_anchor
-        _extract_single_response(anchor_term.response, "anchor() response term")
-    elseif is_cumulative
-        _extract_single_response(cumul_term, "cumul() term")
-    elseif is_leads
-        _extract_single_response(leads_term, "leads() term")
-    else
-        throw(ArgumentError("A local projection without leads and cumulated variables does not make much sense"))
-    end
-
-    # Extract all variable names from RHS (including from function terms)
-    rhs_terms = StatsModels.termvars(formula.rhs)
-    isempty(rhs_terms) &&
-        throw(ArgumentError("formula must contain at least one regressor"))
-
-    # ========================================================================
-    # Stage 1: Remove rows with missing values in base variables
-    # Extract all base variables (without transformations) from formula
-    # ========================================================================
-    base_vars_lhs = _extract_base_variables(formula.lhs)
-    base_vars_rhs = _extract_base_variables(formula.rhs)
-    base_vars = unique(vcat(base_vars_lhs, base_vars_rhs))
-
-    # Keep only complete cases (remove rows with missing base variables)
-    df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
-
-    # ========================================================================
-    # Stage 2: Compute X matrix ONCE (RHS is constant across all horizons)
-    # ========================================================================
-
-    # Create a dummy formula with the response on LHS to compute RHS ModelFrame
-    # We use the original response variable since it exists in df_base
-    dummy_formula = StatsModels.FormulaTerm(StatsModels.Term(response), formula.rhs)
-
-    # Create ModelFrame for the RHS computation (only once!)
-    mf_base = StatsModels.ModelFrame(dummy_formula, df_base_complete)
-
-    # Extract X matrix (this handles all lag/lead transformations on RHS)
-    X_raw = StatsModels.modelcols(mf_base.f.rhs, mf_base.data)
-
-    # Convert missing to NaN for type stability (handles lag(w) which returns missing)
-    # This ensures X is always Float64, matching our leads/cumul which use default=NaN
-    X = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_raw))
-
-    # Store coefficient names (constant across all horizons)
-    coef_names_base = Vector{String}(coefnames(mf_base))
-
-    # Set shock variable: use provided shock or default to first RHS coefficient
-    # Note: coef_names_base includes intercept, so we need the second element (first RHS term)
-    if shock === nothing
-        # Default to first RHS coefficient (skip intercept which is first)
-        if length(coef_names_base) >= 2
-            shock_symbol = Symbol(coef_names_base[2])
-        else
-            # Only intercept exists - cannot select a meaningful shock term
-            throw(
-                ArgumentError(
-                    "Cannot automatically select shock term: only intercept found in model. " *
-                        "Please provide a non-intercept regressor or specify `shock` explicitly."
-                )
-            )
-        end
-    else
-        shock_symbol = shock
-    end
-
-    # Function barrier: X and coef_names_base are now concretely typed (Matrix{Float64},
-    # Vector{String}), so _lp_estimate_horizons can be fully inferred by the compiler.
-    return _lp_estimate_horizons(
-        X, coef_names_base, df_base_complete, horizon,
-        response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
-    )
-end
-
-"""
-    _lp_estimate_horizons(X, coef_names_base, df, horizon, response, shock, formula, ...)
-
-Function barrier for type-stable per-horizon OLS estimation.
-Called after formula parsing to ensure X::Matrix{Float64} is concretely typed,
-breaking the type instability cascade from StatsModels' abstract return types.
-"""
-function _lp_estimate_horizons(
-        X::Matrix{Float64}, coef_names_base::Vector{String},
-        df_base_complete, horizon, response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
-    )
-    # Identify rows where X is complete (no NaN values)
-    X_missing_ind = vec(all(!isnan, X, dims = 2))
-
-    # Helper to estimate one horizon
-    function _estimate_horizon(h)
-        lhs_h = _build_lhs_for_horizon(
-            h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term
-        )
-        # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
-        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
-        y_complete_rows = .!isnan.(y_h)
-        complete_rows = X_missing_ind .& y_complete_rows
-        sum(complete_rows) == 0 &&
-            throw(ArgumentError("No complete observations available for horizon $h"))
-        y = view(y_h, complete_rows)
-        x = view(X, complete_rows, :)
-        return ols(x, y; has_intercept = false)
-    end
-
-    # Estimate first model to get concrete type for typed vector
-    first_model = _estimate_horizon(0)
-
-    # Verify shock variable is present
-    available = Symbol.(coef_names_base)
-    shock_symbol in available ||
-        throw(ArgumentError("shock term $(shock_symbol) not present in model"))
-
-    models = Vector{typeof(first_model)}(undef, horizon + 1)
-    models[1] = first_model
-
-    for (i, h) in enumerate(1:horizon)
-        models[i + 1] = _estimate_horizon(h)
-    end
-
+    d = _lp_design(formula, data, horizon, shock, false)
+    models = _lp_estimate_horizons(nothing, d.X, d.Z, 0, d.lhs, d.data, horizon)
     return LocalProjection(
-        models, horizon, response, shock_symbol, formula, coef_names_base,
-        response === shock_symbol
+        models, horizon, d.response, d.shock, formula, d.coef_names,
+        d.response === d.shock
     )
 end
 
@@ -972,8 +1084,6 @@ function Base.show(io::IO, ::MIME"text/plain", s::IRFSummary)
     )
 end
 
-# NOTE: Plot recipes, coefpath, vcov, and summarize are defined after LPResult below
-
 # ============================================================================
 # Instrumental Variables Local Projections
 # ============================================================================
@@ -983,7 +1093,7 @@ end
 
 Stack of horizon-specific IV models produced by [`lpiv`](@ref).
 """
-struct LocalProjectionIV{M <: IVMatrixEstimator}
+struct LocalProjectionIV{M <: IVMatrixEstimator} <: AbstractLocalProjection
     models::Vector{M}
     horizon::Int
     response::Symbol
@@ -1011,9 +1121,6 @@ Since all horizons share the same RHS, returns the same names regardless of `h`.
 """
 StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names
 
-"""Type alias for dispatching shared methods on both OLS and IV local projections."""
-const LPResult = Union{LocalProjection, LocalProjectionIV}
-
 function Base.show(io::IO, lpiv::LocalProjectionIV)
     return print(
         io,
@@ -1040,7 +1147,7 @@ Returns a new LocalProjectionIV with updated variance-covariance specification f
 
 # Example
 ```julia
-result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=10)
+result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon=10)
 result_hac = result + vcov(Bartlett{NeweyWest}())
 ```
 """
@@ -1058,82 +1165,14 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
 end
 
 """
-    _parse_lpiv_formula(formula::FormulaTerm, sch)
+    lpiv(estimator, formula, data; horizon, shock=nothing) -> LocalProjectionIV
 
-Parse an IV formula to extract endogenous, instrument, and exogenous terms.
-Handles `(x ~ z)` syntax for IV specification within the formula.
-
-Returns:
-- `lhs_term`: Applied schema LHS term
-- `endo_terms`: Vector of endogenous variable terms
-- `instr_terms`: Vector of instrument terms
-- `exo_terms`: Vector of exogenous control terms
-"""
-function _parse_lpiv_formula(formula::FormulaTerm, sch)
-    lhs_term = StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext)
-
-    endo_terms = AbstractTerm[]
-    instr_terms = AbstractTerm[]
-    exo_terms = AbstractTerm[]
-
-    # Handle RHS - can be single term, tuple of terms, or InteractionTerm
-    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
-
-    for term in rhs
-        if term isa FormulaTerm
-            # IV specification: (endo ~ instruments)
-            endo = StatsModels.apply_schema(term.lhs, sch, LPSchemaContext)
-            push!(endo_terms, endo)
-
-            instrs = term.rhs isa Tuple ? term.rhs : (term.rhs,)
-            for instr in instrs
-                instr_applied = StatsModels.apply_schema(instr, sch, LPSchemaContext)
-                push!(instr_terms, instr_applied)
-            end
-        else
-            # Regular exogenous term
-            term_applied = StatsModels.apply_schema(term, sch, LPSchemaContext)
-            push!(exo_terms, term_applied)
-        end
-    end
-
-    return lhs_term, endo_terms, instr_terms, exo_terms
-end
-
-"""
-    _extract_all_vars_from_formula(formula::FormulaTerm) -> Vector{Symbol}
-
-Extract all variable symbols from formula, including those nested in IV specs.
-"""
-function _extract_all_vars_from_formula(formula::FormulaTerm)
-    all_vars = Symbol[]
-
-    # LHS variables
-    append!(all_vars, StatsModels.termvars(formula.lhs))
-
-    # RHS - handle IV specs and regular terms
-    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
-    for term in rhs
-        if term isa FormulaTerm
-            # IV specification: extract from both sides
-            append!(all_vars, StatsModels.termvars(term.lhs))
-            append!(all_vars, StatsModels.termvars(term.rhs))
-        else
-            append!(all_vars, StatsModels.termvars(term))
-        end
-    end
-
-    return unique(all_vars)
-end
-
-"""
-    lpiv(formula, data; horizon, shock=nothing)
-
-Estimate local projections with instrumental variables from horizon 0 to `horizon`.
+Estimate instrumental-variables local projections from horizon 0 to `horizon` with a
+Regress.jl IV `estimator`, e.g. `TSLS()`.
 
 # Formula Syntax
 ```julia
-lpiv(@formula(leads(y) ~ (x ~ z1) + lags(r, 5) + w), df; horizon=10)
+lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1) + lags(r, 5) + w), df; horizon=10)
 ```
 
 Where:
@@ -1142,10 +1181,12 @@ Where:
 - `lags(r, 5)` and `w` - exogenous controls
 
 # Arguments
+- `estimator`: a Regress.jl IV estimator with a matrix-based `Regress.iv` method (`TSLS()`)
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
 - `data::AbstractDataFrame`: DataFrame containing the variables
 - `horizon::Integer`: Maximum forecast horizon (must be non-negative)
-- `shock::Union{Symbol, Nothing}`: Optional coefficient to track (defaults to first endogenous)
+- `shock::Union{Symbol, Nothing}`: coefficient to track; defaults to the first endogenous
+  variable. A `shock` that is not a coefficient of the model is an error.
 
 # Returns
 `LocalProjectionIV` struct containing IV models for each horizon.
@@ -1164,7 +1205,7 @@ y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
 df = DataFrame(y=y, x=x, z=z)
 
 # Fit IV local projection
-result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=5)
+result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon=5)
 
 # Extract IRF (should be ~2.0, OLS would be biased)
 irf = coefpath(result; term=:x)
@@ -1179,201 +1220,22 @@ println("First-stage coefs: ", coef(fs[1]))
 ```
 """
 function lpiv(
-        formula::FormulaTerm, data::AbstractDataFrame;
+        estimator::AbstractIVEstimator, formula::FormulaTerm, data::AbstractDataFrame;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing
     )
-    horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
-    df_base = DataFrame(data)
-
-    # Extract ALL variable names from formula (including those inside IV specs)
-    all_vars = _extract_all_vars_from_formula(formula)
-
-    # Create hints to treat all variables as continuous
-    hints = Dict{Symbol, Any}(var => StatsModels.ContinuousTerm for var in all_vars)
-
-    sch = StatsModels.schema(formula, df_base, hints)
-
-    # Parse the IV formula
-    lhs_term, endo_terms, instr_terms,
-        exo_terms = _parse_lpiv_formula(formula, sch)
-
-    # Validate IV specification
-    isempty(endo_terms) &&
-        throw(ArgumentError("No endogenous variables found. Use (endo ~ instruments) syntax."))
-    isempty(instr_terms) &&
-        throw(ArgumentError("No instruments found. Use (endo ~ instruments) syntax."))
-
-    # Extract base variable names for filtering
-    base_vars_lhs = _extract_base_variables(formula.lhs)
-    base_vars_rhs = Symbol[]
-    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
-    for term in rhs
-        if term isa FormulaTerm
-            append!(base_vars_rhs, _extract_base_variables(term.lhs))
-            append!(base_vars_rhs, _extract_base_variables(term.rhs))
-        else
-            append!(base_vars_rhs, _extract_base_variables(term))
-        end
-    end
-    base_vars = unique(vcat(base_vars_lhs, base_vars_rhs))
-
-    # Check LHS structure (leads, cumul, anchor)
-    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term = _unwrap_lhs(lhs_term)
-
-    # Extract response variable name
-    response = if is_anchor
-        _extract_single_response(anchor_term.response, "anchor() response term")
-    elseif is_cumulative
-        _extract_single_response(cumul_term, "cumul() term")
-    elseif is_leads
-        _extract_single_response(leads_term, "leads() term")
-    else
-        throw(ArgumentError("LHS must use leads(), cumul(), or anchor()"))
-    end
-
-    # Stage 1: Remove rows with missing base variables
-    df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
-
-    # Stage 2: Build X (endogenous + exogenous) and Z (instruments + exogenous) matrices ONCE
-
-    # Get exogenous matrix (includes intercept from StatsModels)
-    # Create a dummy formula for exogenous terms
-    if !isempty(exo_terms)
-        exo_tuple = length(exo_terms) == 1 ? exo_terms[1] : Tuple(exo_terms)
-        dummy_formula_exo = StatsModels.FormulaTerm(StatsModels.Term(response), exo_tuple)
-        mf_exo = StatsModels.ModelFrame(dummy_formula_exo, df_base_complete)
-        X_exo_raw = StatsModels.modelcols(mf_exo.f.rhs, mf_exo.data)
-        X_exo = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_exo_raw))
-        coef_names_exo = Vector{String}(coefnames(mf_exo))
-    else
-        # No exogenous terms - just intercept
-        n_obs = nrow(df_base_complete)
-        X_exo = ones(n_obs, 1)
-        coef_names_exo = ["(Intercept)"]
-    end
-
-    # Get endogenous matrix - extract columns directly from terms (no formula intercept)
-    endo_names = String[]
-    X_endo_cols = Matrix{Float64}[]
-    for endo_term in endo_terms
-        # Use modelcols directly on the term to avoid intercept
-        endo_col_raw = StatsModels.modelcols(endo_term, df_base_complete)
-        endo_col = map(v -> ismissing(v) ? NaN : Float64(v), endo_col_raw)
-        push!(
-            X_endo_cols,
-            endo_col isa AbstractMatrix ? Matrix{Float64}(endo_col) :
-                reshape(Vector{Float64}(endo_col), :, 1)
+    hasmethod(iv, Tuple{typeof(estimator), Matrix{Float64}, Matrix{Float64}, Vector{Float64}}) ||
+        throw(
+        ArgumentError(
+            "Regress.jl has no matrix-based `iv` method for $(nameof(typeof(estimator)))"
         )
-        term_names = StatsModels.coefnames(endo_term)
-        append!(endo_names, term_names isa Vector ? term_names : [term_names])
-    end
-    X_endo = hcat(X_endo_cols...)::Matrix{Float64}
-
-    # Get instrument matrix - extract columns directly from terms (no formula intercept)
-    instr_names = String[]
-    Z_instr_cols = Matrix{Float64}[]
-    for instr_term in instr_terms
-        # Use modelcols directly on the term to avoid intercept
-        instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
-        instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
-        push!(
-            Z_instr_cols,
-            instr_col isa AbstractMatrix ? Matrix{Float64}(instr_col) :
-                reshape(Vector{Float64}(instr_col), :, 1)
-        )
-        term_names = StatsModels.coefnames(instr_term)
-        append!(instr_names, term_names isa Vector ? term_names : [term_names])
-    end
-    Z_instr = hcat(Z_instr_cols...)::Matrix{Float64}
-
-    # Build full X = [exogenous, endogenous] and Z = [exogenous, instruments]
-    X_full = hcat(X_exo, X_endo)::Matrix{Float64}
-    Z_full = hcat(X_exo, Z_instr)::Matrix{Float64}
-
-    n_endogenous = size(X_endo, 2)
-    coef_names_base = Vector{String}(vcat(coef_names_exo, endo_names))
-
-    # Check order condition
-    n_instruments = size(Z_instr, 2)
-    n_instruments >= n_endogenous ||
-        throw(ArgumentError("Not enough instruments: $n_instruments < $n_endogenous (order condition violated)"))
-
-    # Set shock variable
-    if shock === nothing
-        shock_symbol = Symbol(endo_names[1])
-    else
-        shock_symbol = shock
-    end
-
-    # Function barrier: X_full, Z_full, coef_names_base are now concretely typed,
-    # so _lpiv_estimate_horizons can be fully inferred by the compiler.
-    return _lpiv_estimate_horizons(
-        X_full, Z_full, coef_names_base, df_base_complete,
-        horizon, n_endogenous, response, shock_symbol, formula,
-        endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
     )
-end
-
-"""
-    _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df, ...)
-
-Function barrier for type-stable per-horizon IV estimation.
-Called after formula parsing and matrix assembly to ensure all matrix arguments
-are concretely typed as Matrix{Float64}.
-"""
-function _lpiv_estimate_horizons(
-        X_full::Matrix{Float64}, Z_full::Matrix{Float64},
-        coef_names_base::Vector{String}, df_base_complete,
-        horizon, n_endogenous, response, shock_symbol, formula,
-        endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
+    d = _lp_design(formula, data, horizon, shock, true)
+    models = _lp_estimate_horizons(
+        estimator, d.X, d.Z, length(d.endo_names), d.lhs, d.data, horizon
     )
-    # Identify complete rows
-    X_missing_ind = vec(all(!isnan, X_full, dims = 2))
-    Z_missing_ind = vec(all(!isnan, Z_full, dims = 2))
-    XZ_complete = X_missing_ind .& Z_missing_ind
-
-    # Helper to estimate one horizon
-    function _estimate_iv_horizon(h)
-        lhs_h = _build_lhs_for_horizon(
-            h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term
-        )
-        # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
-        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
-        y_complete_rows = .!isnan.(y_h)
-        complete_rows = XZ_complete .& y_complete_rows
-        sum(complete_rows) == 0 &&
-            throw(ArgumentError("No complete observations available for horizon $h"))
-        y = view(y_h, complete_rows)
-        X = view(X_full, complete_rows, :)
-        Z = view(Z_full, complete_rows, :)
-        return iv(
-            TSLS(), collect(Z), collect(X), collect(y);
-            has_intercept = false, n_endogenous = n_endogenous
-        )
-    end
-
-    # Estimate first model to get concrete type
-    first_model = _estimate_iv_horizon(0)
-
-    # Verify shock variable is present
-    available = Symbol.(coef_names_base)
-    shock_symbol in available ||
-        throw(ArgumentError("shock term $(shock_symbol) not present in model"))
-
-    models = Vector{typeof(first_model)}(undef, horizon + 1)
-    models[1] = first_model
-
-    for (i, h) in enumerate(1:horizon)
-        models[i + 1] = _estimate_iv_horizon(h)
-    end
-
     return LocalProjectionIV(
-        models, horizon, response, shock_symbol, formula, coef_names_base,
-        endo_names, instr_names, response === shock_symbol
+        models, horizon, d.response, d.shock, formula, d.coef_names,
+        d.endo_names, d.instr_names, d.response === d.shock
     )
 end
 
@@ -1396,7 +1258,7 @@ Return first-stage regressions and diagnostics for horizon `h` (0-indexed).
 
 # Example
 ```julia
-result = lpiv(@formula(leads(y) ~ (x ~ z1 + z2)), df; horizon=10)
+result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2)), df; horizon=10)
 fs = first_stage(result, 0)
 coef(fs.models[1])    # first-stage coefficients
 fs.F_nonrobust        # non-robust F
@@ -1482,7 +1344,7 @@ function _tautological_weakivtest(model; level = 0.05, kwargs...)
 end
 
 # ============================================================================
-# Shared methods for LocalProjection and LocalProjectionIV (via LPResult)
+# Shared methods for LocalProjection and LocalProjectionIV
 # ============================================================================
 
 """
@@ -1491,7 +1353,7 @@ end
 Collect the coefficient path across horizons for `term`.
 Works for both `LocalProjection` and `LocalProjectionIV`.
 """
-function coefpath(lp::LPResult; term::Symbol = lp.shock)
+function coefpath(lp::AbstractLocalProjection; term::Symbol = lp.shock)
     n = lp.horizon + 1
     names = lp.coef_names
     idx = findfirst(==(String(term)), names)
@@ -1515,7 +1377,7 @@ end
 Compute diagonal covariance entries horizon-by-horizon using `estimator`
 from `CovarianceMatrices.jl`. Works for both `LocalProjection` and `LocalProjectionIV`.
 """
-function vcov(estimator, lp::LPResult)
+function vcov(estimator, lp::AbstractLocalProjection)
     n = lp.horizon + 1
     variances = Dict{Symbol, Vector{Float64}}()
     names = Symbol.(lp.coef_names)
@@ -1550,7 +1412,7 @@ Create a summary table of impulse response coefficients with standard errors
 and confidence intervals. Works for both `LocalProjection` and `LocalProjectionIV`.
 """
 function summarize(
-        lp::LPResult, cov::LocalProjectionCovariance;
+        lp::AbstractLocalProjection, cov::LocalProjectionCovariance;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
     )
     level_f = Float64(level)
@@ -1573,7 +1435,7 @@ end
 Convenience method that computes vcov internally before creating summary table.
 """
 function summarize(
-        lp::LPResult,
+        lp::AbstractLocalProjection,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
     )
@@ -1619,7 +1481,7 @@ function irfplot_axis end
 Internal wrapper type for dispatching plot recipes on LocalProjection/LocalProjectionIV
 with covariance. Users should call `plot(lp, cov; ...)` or `plot(lp, estimator; ...)` directly.
 """
-struct IRFPlot{L <: LPResult, E}
+struct IRFPlot{L <: AbstractLocalProjection, E}
     lp::L
     cov::LocalProjectionCovariance{E}
     term::Symbol
@@ -1671,14 +1533,14 @@ end
 end
 
 @recipe function f(
-        lp::LPResult, cov::LocalProjectionCovariance;
+        lp::AbstractLocalProjection, cov::LocalProjectionCovariance;
         term = lp.shock, levels = [0.95]
     )
     IRFPlot(lp, cov, term, Float64.(levels))
 end
 
 @recipe function f(
-        lp::LPResult,
+        lp::AbstractLocalProjection,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term = lp.shock, levels = [0.95]
     )
@@ -1722,7 +1584,7 @@ plot(irf)  # Uses MET's recipe
 ```
 """
 function as_irf_result(
-        lp::LPResult;
+        lp::AbstractLocalProjection;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
         coverage::Vector{Float64} = [0.68, 0.9, 0.95]

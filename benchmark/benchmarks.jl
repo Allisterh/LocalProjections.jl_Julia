@@ -126,14 +126,14 @@ SUITE["lpiv"] = BenchmarkGroup()
 let rng = StableRNG(DEFAULT_SEED + 20)
     df = generate_lpiv_data(rng, 500)
 
-    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
 end
 
 let rng = StableRNG(DEFAULT_SEED + 21)
     df = generate_lpiv_data(rng, 1000)
 
-    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
-    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
+    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
 end
 
 # ----------------------------------------------------------------------------

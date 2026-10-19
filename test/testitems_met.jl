@@ -256,7 +256,7 @@ end
     df = DataFrame(y = y, x = x, z = z)
 
     # IV local projection
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 5)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 5)
 
     # Convert to MET type
     irf_result = as_irf_result(result; vcov_estimator = HC1())
@@ -286,7 +286,7 @@ end
 
     df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
     irf_result = as_irf_result(
         result;
