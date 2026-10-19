@@ -866,3 +866,82 @@ end
         LocalProjections.Regress.LIML(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1
     )
 end
+
+@testitem "Tables.jl input, categorical controls and sample policy" tags = [:core, :lpiv, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StatsBase, Tables, Test
+    using CovarianceMatrices: HC1
+    using Regress: vcov
+    using StableRNGs
+
+    rng = StableRNG(20261020)
+    n = 150
+    x = randn(rng, n)
+    z = x .+ randn(rng, n)
+    w = randn(rng, n)
+    y = cumsum(randn(rng, n)) .+ 0.5 .* x
+    g = rand(rng, ["a", "b", "c"], n)
+    df = DataFrame(; y, x, z, w, g)
+    H = 4
+
+    # Any Tables.jl table gives the same estimates as a DataFrame
+    f = @formula(leads(y) ~ x + lags(w, 2))
+    r_df = lp(f, df; horizon = H)
+    r_nt = lp(f, (; y, x, z, w); horizon = H)
+    @test coefpath(r_nt) == coefpath(r_df)
+    @test nobs.(r_nt.models) == nobs.(r_df.models)
+    fiv = @formula(cumul(y) ~ (x ~ z) + w)
+    @test coefpath(lpiv(TSLS(), fiv, Tables.rowtable(df); horizon = H)) ==
+        coefpath(lpiv(TSLS(), fiv, df; horizon = H))
+    @test_throws "data must be a Tables.jl table" lp(f, [y x]; horizon = H)
+
+    # String columns enter through StatsModels contrasts (dummy coding)
+    rc = lp(@formula(leads(y) ~ x + g), df; horizon = 1)
+    @test rc.coef_names == ["(Intercept)", "x", "g: b", "g: c"]
+    Xg = hcat(ones(n), x, g .== "b", g .== "c")
+    @test coef(rc.models[1]) ≈ Xg \ y
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + g), df; horizon = 1)
+    @test riv.coef_names == ["(Intercept)", "g: b", "g: c", "x"]
+    g_miss = allowmissing(g)
+    g_miss[3] = missing
+    @test_throws "categorical variable `g` contains missing values" lp(
+        @formula(leads(y) ~ x + g), DataFrame(; y, x, g = g_miss); horizon = 1
+    )
+
+    # Missing values in numeric columns drop rows per horizon without shifting time:
+    # with y[50] missing, horizon h loses row 50 - h (and the last h rows).
+    y_miss = allowmissing(y)
+    y_miss[50] = missing
+    rm = lp(@formula(leads(y) ~ x), DataFrame(; y = y_miss, x); horizon = 2)
+    @test nobs.(rm.models) == [n - 1, n - 2, n - 3]
+    for h in 0:2
+        keep = [t + h <= n && !ismissing(y_miss[t + h]) for t in 1:n]
+        y_h = Float64[y_miss[t + h] for t in 1:n if keep[t]]
+        @test coef(rm.models[h + 1]) ≈ hcat(ones(sum(keep)), x[keep]) \ y_h
+    end
+
+    # Fixed sample: every horizon uses the rows available at all horizons
+    r_fix = lp(f, df; horizon = H, sample = :fixed)
+    @test r_fix.sample === :fixed
+    @test r_df.sample === :varying
+    @test allequal(nobs.(r_fix.models))
+    @test nobs(r_fix.models[1]) == n - 2 - H  # two lags at the start, H leads at the end
+    @test coef(r_fix.models[H + 1]) ≈ coef(r_df.models[H + 1])
+    rows = 3:(n - H)
+    X_fix = hcat(ones(length(rows)), x[rows], w[rows .- 1], w[rows .- 2])
+    @test coef(r_fix.models[1]) ≈ X_fix \ y[rows]
+    riv_fix = lpiv(TSLS(), fiv, df; horizon = H, sample = :fixed)
+    @test riv_fix.sample === :fixed
+    @test allequal(nobs.(riv_fix.models))
+    @test riv_fix.sample === (riv_fix + vcov(HC1())).sample
+
+    msg = "sample must be :varying or :fixed (got :all)"
+    @test_throws msg lp(f, df; horizon = H, sample = :all)
+    @test_throws msg lpiv(TSLS(), fiv, df; horizon = H, sample = :all)
+
+    # Per-horizon sample sizes are displayed
+    shown = sprint(show, MIME"text/plain"(), r_df)
+    @test occursin("Sample:     varying", shown)
+    @test occursin("Obs (h=0:$H): $(join(nobs.(r_df.models), ", "))", shown)
+    @test occursin("Sample:       fixed", sprint(show, MIME"text/plain"(), riv_fix))
+end
