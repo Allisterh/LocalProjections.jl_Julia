@@ -9,15 +9,15 @@ export irfplot, irfplot!, irfplot_axis
 
 using DataFrames
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
-                    text_table_borders__unicode_rounded, fmt__round, @crayon_str
+    text_table_borders__unicode_rounded, fmt__round, @crayon_str
 using Tables
 using StatsModels
 using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
-                   ContinuousTerm, coefnames
+    ContinuousTerm, coefnames
 using Regress
 using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-               WeakIVTestResult, FirstStageIV, lags, LagTerm,
-               first_stage, weakivtest
+    WeakIVTestResult, FirstStageIV, lags, LagTerm,
+    first_stage, weakivtest
 using CovarianceMatrices
 using Statistics
 using Distributions
@@ -105,13 +105,17 @@ function _unwrap_lhs(lhs_term)
         inner = lhs_term.response
         is_cumul = inner isa CumulTerm
         is_leads = inner isa LeadTerm || !is_cumul  # Default to leads
-        return (true, is_cumul, is_leads, lhs_term,
+        return (
+            true, is_cumul, is_leads, lhs_term,
             is_cumul ? inner : nothing,
-            is_leads && inner isa LeadTerm ? inner : nothing)
+            is_leads && inner isa LeadTerm ? inner : nothing,
+        )
     else
-        return (false, lhs_term isa CumulTerm, lhs_term isa LeadTerm,
+        return (
+            false, lhs_term isa CumulTerm, lhs_term isa LeadTerm,
             nothing, lhs_term isa CumulTerm ? lhs_term : nothing,
-            lhs_term isa LeadTerm ? lhs_term : nothing)
+            lhs_term isa LeadTerm ? lhs_term : nothing,
+        )
     end
 end
 
@@ -133,8 +137,10 @@ end
 
 Build the LHS term for a specific horizon h, handling anchor/cumul/leads combinations.
 """
-function _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads,
-        anchor_term, cumul_term, leads_term)
+function _build_lhs_for_horizon(
+        h::Int, is_anchor, is_cumul, is_leads,
+        anchor_term, cumul_term, leads_term
+    )
     if is_anchor
         inner = if is_cumul && cumul_term !== nothing
             CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
@@ -144,7 +150,8 @@ function _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads,
             LeadTerm{typeof(anchor_term.response)}(anchor_term.response, h)
         end
         return AnchorTerm{typeof(inner), typeof(anchor_term.anchor)}(
-            inner, anchor_term.anchor, 0)
+            inner, anchor_term.anchor, 0
+        )
     elseif is_cumul
         return CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
     elseif is_leads
@@ -184,7 +191,8 @@ end
 StatsModels.terms(t::CumulTerm) = (t.term,)
 
 function StatsModels.apply_schema(
-        t::FunctionTerm{typeof(cumul)}, sch::StatsModels.Schema, ctx::Type)
+        t::FunctionTerm{typeof(cumul)}, sch::StatsModels.Schema, ctx::Type
+    )
     term, horizon = _parse_unary_binary_args(t, "cumul", nothing)
     term = StatsModels.apply_schema(term, sch, ctx)
     return CumulTerm{typeof(term)}(term, horizon)
@@ -192,7 +200,7 @@ end
 
 function StatsModels.apply_schema(t::CumulTerm, sch::StatsModels.Schema, ctx::Type)
     term = StatsModels.apply_schema(t.term, sch, ctx)
-    CumulTerm{typeof(term)}(term, t.horizon)
+    return CumulTerm{typeof(term)}(term, t.horizon)
 end
 
 # modelcols: Apply cumulative sum transformation
@@ -209,7 +217,7 @@ StatsModels.width(ct::CumulTerm) = 1
 
 # show: Display the term
 function Base.show(io::IO, ct::CumulTerm)
-    if ct.horizon === nothing
+    return if ct.horizon === nothing
         print(io, "cumul($(ct.term))")
     else
         print(io, "cumul($(ct.term), $(ct.horizon))")
@@ -260,7 +268,8 @@ end
 StatsModels.terms(t::LeadTerm) = (t.term,)
 
 function StatsModels.apply_schema(
-        t::FunctionTerm{typeof(leads)}, sch::StatsModels.Schema, ctx::Type)
+        t::FunctionTerm{typeof(leads)}, sch::StatsModels.Schema, ctx::Type
+    )
     term, horizon = _parse_unary_binary_args(t, "leads", nothing)
     term = StatsModels.apply_schema(term, sch, ctx)
     return LeadTerm{typeof(term)}(term, horizon)
@@ -268,7 +277,7 @@ end
 
 function StatsModels.apply_schema(t::LeadTerm, sch::StatsModels.Schema, ctx::Type)
     term = StatsModels.apply_schema(t.term, sch, ctx)
-    LeadTerm{typeof(term)}(term, t.horizon)
+    return LeadTerm{typeof(term)}(term, t.horizon)
 end
 
 # modelcols: Apply lead transformation with NaN handling
@@ -284,7 +293,7 @@ StatsModels.width(lt::LeadTerm) = 1
 
 # show: Display the term
 function Base.show(io::IO, lt::LeadTerm)
-    if lt.horizon === nothing
+    return if lt.horizon === nothing
         print(io, "leads($(lt.term))")
     else
         print(io, "leads($(lt.term), $(lt.horizon))")
@@ -326,11 +335,12 @@ At h=1: returns y_{t+1} - z_t
 At h=2: returns y_{t+2} - z_t, etc.
 """
 function anchor(response::T, anchor_var::S) where {T <: AbstractTerm, S <: AbstractTerm}
-    AnchorTerm{T, S}(response, anchor_var, nothing)
+    return AnchorTerm{T, S}(response, anchor_var, nothing)
 end
 function anchor(response::T, anchor_var::S, h::Int) where {
-        T <: AbstractTerm, S <: AbstractTerm}
-    AnchorTerm{T, S}(response, anchor_var, h)
+        T <: AbstractTerm, S <: AbstractTerm,
+    }
+    return AnchorTerm{T, S}(response, anchor_var, h)
 end
 
 # termvars: Extract variables from anchor() for schema creation
@@ -349,7 +359,8 @@ end
 StatsModels.terms(t::AnchorTerm) = (t.response, t.anchor)
 
 function StatsModels.apply_schema(
-        t::FunctionTerm{typeof(anchor)}, sch::StatsModels.Schema, ctx::Type)
+        t::FunctionTerm{typeof(anchor)}, sch::StatsModels.Schema, ctx::Type
+    )
     if length(t.args) == 2  # anchor(response, anchor_var) - horizon from context
         response, anchor_var = t.args
         horizon = nothing
@@ -370,7 +381,7 @@ end
 function StatsModels.apply_schema(t::AnchorTerm, sch::StatsModels.Schema, ctx::Type)
     response = StatsModels.apply_schema(t.response, sch, ctx)
     anchor_var = StatsModels.apply_schema(t.anchor, sch, ctx)
-    AnchorTerm{typeof(response), typeof(anchor_var)}(response, anchor_var, t.horizon)
+    return AnchorTerm{typeof(response), typeof(anchor_var)}(response, anchor_var, t.horizon)
 end
 
 # modelcols: Apply anchored transformation (y_{t+h} - z_t)
@@ -388,7 +399,7 @@ StatsModels.width(at::AnchorTerm) = 1
 
 # show: Display the term
 function Base.show(io::IO, at::AnchorTerm)
-    if at.horizon === nothing
+    return if at.horizon === nothing
         print(io, "anchor($(at.response), $(at.anchor))")
     else
         print(io, "anchor($(at.response), $(at.anchor), $(at.horizon))")
@@ -408,7 +419,7 @@ end
 
 # termvars: Return variables used in anchor term
 function StatsModels.termvars(at::AnchorTerm)
-    unique(vcat(StatsModels.termvars(at.response), StatsModels.termvars(at.anchor)))
+    return unique(vcat(StatsModels.termvars(at.response), StatsModels.termvars(at.anchor)))
 end
 
 # ============================================================================
@@ -502,7 +513,7 @@ Since all horizons share the same RHS, returns the same names regardless of `h`.
 StatsModels.coefnames(lp::LocalProjection, h::Int) = lp.coef_names
 
 function Base.show(io::IO, lp::LocalProjection)
-    print(io, "LocalProjection(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))")
+    return print(io, "LocalProjection(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
@@ -511,7 +522,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Shock:      $(lp.shock)")
     println(io, "  Horizon:    0:$(lp.horizon)")
     println(io, "  Formula:    $(lp.base_formula)")
-    println(io, "  Coef names: $(lp.coef_names)")
+    return println(io, "  Coef names: $(lp.coef_names)")
 end
 
 """
@@ -656,14 +667,17 @@ _extract_base_variables(FunctionTerm(lag, [:x, 4])) # [:x]  (strips lag)
 ```
 """
 # Specialized methods for specific term types
-function _extract_base_variables(t::Union{
-        Term, StatsModels.ContinuousTerm, StatsModels.CategoricalTerm})
-    [t.sym]
+function _extract_base_variables(
+        t::Union{
+            Term, StatsModels.ContinuousTerm, StatsModels.CategoricalTerm,
+        }
+    )
+    return [t.sym]
 end
 _extract_base_variables(t::CumulTerm) = _extract_base_variables(t.term)
 _extract_base_variables(t::LeadTerm) = _extract_base_variables(t.term)
 function _extract_base_variables(t::AnchorTerm)
-    unique(vcat(_extract_base_variables(t.response), _extract_base_variables(t.anchor)))
+    return unique(vcat(_extract_base_variables(t.response), _extract_base_variables(t.anchor)))
 end
 
 function _extract_base_variables(ft::FunctionTerm)
@@ -673,8 +687,12 @@ function _extract_base_variables(ft::FunctionTerm)
     elseif ft.f === anchor
         # For anchor, extract both response and anchor variables
         length(ft.args) >= 2 || return StatsModels.termvars(ft)
-        return unique(vcat(_extract_base_variables(ft.args[1]),
-            _extract_base_variables(ft.args[2])))
+        return unique(
+            vcat(
+                _extract_base_variables(ft.args[1]),
+                _extract_base_variables(ft.args[2])
+            )
+        )
     else
         # For other functions, use termvars
         return StatsModels.termvars(ft)
@@ -691,10 +709,12 @@ function _extract_base_variables(terms::Tuple)
 end
 
 function _extract_base_variables(ft::FormulaTerm)
-    unique(vcat(
-        _extract_base_variables(ft.lhs),
-        _extract_base_variables(ft.rhs)
-    ))
+    return unique(
+        vcat(
+            _extract_base_variables(ft.lhs),
+            _extract_base_variables(ft.rhs)
+        )
+    )
 end
 
 # InteractionTerm and other composite terms
@@ -712,8 +732,10 @@ end
 Estimate local projections implied by `formula` up to the supplied `horizon`.
 `shock` selects the coefficient path of interest (defaults to the first RHS term).
 """
-function lp(formula::FormulaTerm, data::AbstractDataFrame;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
+function lp(
+        formula::FormulaTerm, data::AbstractDataFrame;
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing
+    )
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
     df_base = DataFrame(data)  # avoid mutating caller's data
 
@@ -733,7 +755,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     # Note: AnchorTerm can contain LeadTerm or CumulTerm inside (from pipe syntax like leads(y)|z or cumul(y)|z)
     # If AnchorTerm contains plain term (y|z), default to leads behavior
     is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-    leads_term = _unwrap_lhs(lhs_term)
+        leads_term = _unwrap_lhs(lhs_term)
 
     # Extract response variable/data
     # For cumulative/leads/anchor cases, we need to extract the base variable names for Stage 1 filtering
@@ -793,9 +815,12 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
             shock_symbol = Symbol(coef_names_base[2])
         else
             # Only intercept exists - cannot select a meaningful shock term
-            throw(ArgumentError(
-                "Cannot automatically select shock term: only intercept found in model. " *
-                "Please provide a non-intercept regressor or specify `shock` explicitly."))
+            throw(
+                ArgumentError(
+                    "Cannot automatically select shock term: only intercept found in model. " *
+                        "Please provide a non-intercept regressor or specify `shock` explicitly."
+                )
+            )
         end
     else
         shock_symbol = shock
@@ -803,9 +828,11 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Function barrier: X and coef_names_base are now concretely typed (Matrix{Float64},
     # Vector{String}), so _lp_estimate_horizons can be fully inferred by the compiler.
-    return _lp_estimate_horizons(X, coef_names_base, df_base_complete, horizon,
+    return _lp_estimate_horizons(
+        X, coef_names_base, df_base_complete, horizon,
         response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
+    )
 end
 
 """
@@ -815,16 +842,20 @@ Function barrier for type-stable per-horizon OLS estimation.
 Called after formula parsing to ensure X::Matrix{Float64} is concretely typed,
 breaking the type instability cascade from StatsModels' abstract return types.
 """
-function _lp_estimate_horizons(X::Matrix{Float64}, coef_names_base::Vector{String},
+function _lp_estimate_horizons(
+        X::Matrix{Float64}, coef_names_base::Vector{String},
         df_base_complete, horizon, response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
+    )
     # Identify rows where X is complete (no NaN values)
     X_missing_ind = vec(all(!isnan, X, dims = 2))
 
     # Helper to estimate one horizon
     function _estimate_horizon(h)
-        lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term)
+        lhs_h = _build_lhs_for_horizon(
+            h, is_anchor, is_cumulative, is_leads,
+            anchor_term, cumul_term, leads_term
+        )
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
         y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
         y_complete_rows = .!isnan.(y_h)
@@ -853,7 +884,8 @@ function _lp_estimate_horizons(X::Matrix{Float64}, coef_names_base::Vector{Strin
 
     return LocalProjection(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        response === shock_symbol)
+        response === shock_symbol
+    )
 end
 
 """
@@ -888,7 +920,7 @@ end
 
 # Convert to DataFrame for data access
 function DataFrames.DataFrame(s::IRFSummary)
-    DataFrame(
+    return DataFrame(
         horizon = s.horizon,
         coef = s.coef,
         se = s.se,
@@ -898,7 +930,7 @@ function DataFrames.DataFrame(s::IRFSummary)
 end
 
 function Base.show(io::IO, s::IRFSummary)
-    println(io, "IRFSummary(term=$(s.term), level=$(s.level), scale=$(s.scale))")
+    return println(io, "IRFSummary(term=$(s.term), level=$(s.level), scale=$(s.scale))")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", s::IRFSummary)
@@ -941,7 +973,8 @@ function Base.show(io::IO, ::MIME"text/plain", s::IRFSummary)
     # Enable color output for ANSI bold codes
     ioc = IOContext(io, :color => true)
 
-    pretty_table(ioc, data;
+    return pretty_table(
+        ioc, data;
         column_labels = labels,
         title = title,
         highlighters = [hl_coef, hl_lower, hl_upper],
@@ -994,8 +1027,10 @@ StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names
 const LPResult = Union{LocalProjection, LocalProjectionIV}
 
 function Base.show(io::IO, lpiv::LocalProjectionIV)
-    print(io,
-        "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))")
+    return print(
+        io,
+        "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))"
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
@@ -1006,7 +1041,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Formula:      $(lpiv.base_formula)")
     println(io, "  Endogenous:   $(lpiv.endogenous_names)")
     println(io, "  Instruments:  $(lpiv.instrument_names)")
-    println(io, "  Coef names:   $(lpiv.coef_names)")
+    return println(io, "  Coef names:   $(lpiv.coef_names)")
 end
 
 """
@@ -1022,7 +1057,8 @@ result_hac = result + vcov(Bartlett{NeweyWest}())
 ```
 """
 function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
-        M <: IVMatrixEstimator, V}
+        M <: IVMatrixEstimator, V,
+    }
     new_models = [m + v for m in lpiv.models]
     M_new = eltype(new_models)
     return LocalProjectionIV{M_new}(
@@ -1154,8 +1190,10 @@ println("First-stage R²: ", r2(fs[1]))
 println("First-stage coefs: ", coef(fs[1]))
 ```
 """
-function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
+function lpiv(
+        formula::FormulaTerm, data::AbstractDataFrame;
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing
+    )
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
     df_base = DataFrame(data)
 
@@ -1169,7 +1207,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Parse the IV formula
     lhs_term, endo_terms, instr_terms,
-    exo_terms = _parse_lpiv_formula(formula, sch)
+        exo_terms = _parse_lpiv_formula(formula, sch)
 
     # Validate IV specification
     isempty(endo_terms) &&
@@ -1193,7 +1231,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Check LHS structure (leads, cumul, anchor)
     is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-    leads_term = _unwrap_lhs(lhs_term)
+        leads_term = _unwrap_lhs(lhs_term)
 
     # Extract response variable name
     response = if is_anchor
@@ -1234,9 +1272,11 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         # Use modelcols directly on the term to avoid intercept
         endo_col_raw = StatsModels.modelcols(endo_term, df_base_complete)
         endo_col = map(v -> ismissing(v) ? NaN : Float64(v), endo_col_raw)
-        push!(X_endo_cols,
+        push!(
+            X_endo_cols,
             endo_col isa AbstractMatrix ? Matrix{Float64}(endo_col) :
-            reshape(Vector{Float64}(endo_col), :, 1))
+                reshape(Vector{Float64}(endo_col), :, 1)
+        )
         term_names = StatsModels.coefnames(endo_term)
         append!(endo_names, term_names isa Vector ? term_names : [term_names])
     end
@@ -1249,9 +1289,11 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         # Use modelcols directly on the term to avoid intercept
         instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
         instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
-        push!(Z_instr_cols,
+        push!(
+            Z_instr_cols,
             instr_col isa AbstractMatrix ? Matrix{Float64}(instr_col) :
-            reshape(Vector{Float64}(instr_col), :, 1))
+                reshape(Vector{Float64}(instr_col), :, 1)
+        )
         term_names = StatsModels.coefnames(instr_term)
         append!(instr_names, term_names isa Vector ? term_names : [term_names])
     end
@@ -1278,10 +1320,12 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Function barrier: X_full, Z_full, coef_names_base are now concretely typed,
     # so _lpiv_estimate_horizons can be fully inferred by the compiler.
-    return _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df_base_complete,
+    return _lpiv_estimate_horizons(
+        X_full, Z_full, coef_names_base, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
+    )
 end
 
 """
@@ -1291,11 +1335,13 @@ Function barrier for type-stable per-horizon IV estimation.
 Called after formula parsing and matrix assembly to ensure all matrix arguments
 are concretely typed as Matrix{Float64}.
 """
-function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64},
+function _lpiv_estimate_horizons(
+        X_full::Matrix{Float64}, Z_full::Matrix{Float64},
         coef_names_base::Vector{String}, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term
+    )
     # Identify complete rows
     X_missing_ind = vec(all(!isnan, X_full, dims = 2))
     Z_missing_ind = vec(all(!isnan, Z_full, dims = 2))
@@ -1303,8 +1349,10 @@ function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64
 
     # Helper to estimate one horizon
     function _estimate_iv_horizon(h)
-        lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term)
+        lhs_h = _build_lhs_for_horizon(
+            h, is_anchor, is_cumulative, is_leads,
+            anchor_term, cumul_term, leads_term
+        )
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
         y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
         y_complete_rows = .!isnan.(y_h)
@@ -1314,8 +1362,10 @@ function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64
         y = view(y_h, complete_rows)
         X = view(X_full, complete_rows, :)
         Z = view(Z_full, complete_rows, :)
-        return iv(TSLS(), collect(Z), collect(X), collect(y);
-            has_intercept = false, n_endogenous = n_endogenous)
+        return iv(
+            TSLS(), collect(Z), collect(X), collect(y);
+            has_intercept = false, n_endogenous = n_endogenous
+        )
     end
 
     # Estimate first model to get concrete type
@@ -1335,7 +1385,8 @@ function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64
 
     return LocalProjectionIV(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        endo_names, instr_names, response === shock_symbol)
+        endo_names, instr_names, response === shock_symbol
+    )
 end
 
 """
@@ -1367,9 +1418,11 @@ fs.F_robust           # robust F using the model's current vcov
 function Regress.first_stage(lpiv::LocalProjectionIV, h::Int)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
-    return Regress.first_stage(lpiv.models[h + 1];
+    return Regress.first_stage(
+        lpiv.models[h + 1];
         endogenous_names = lpiv.endogenous_names,
-        instrument_names = lpiv.instrument_names)
+        instrument_names = lpiv.instrument_names
+    )
 end
 
 # ============================================================================
@@ -1508,8 +1561,10 @@ end
 Create a summary table of impulse response coefficients with standard errors
 and confidence intervals. Works for both `LocalProjection` and `LocalProjectionIV`.
 """
-function summarize(lp::LPResult, cov::LocalProjectionCovariance;
-        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
+function summarize(
+        lp::LPResult, cov::LocalProjectionCovariance;
+        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
+    )
     level_f = Float64(level)
     scale_f = Float64(scale)
     beta = coefpath(lp; term = term) .* scale_f
@@ -1518,8 +1573,10 @@ function summarize(lp::LPResult, cov::LocalProjectionCovariance;
     lower = beta .- z .* se
     upper = beta .+ z .* se
 
-    IRFSummary(term, level_f, scale_f,
-        collect(0:lp.horizon), beta, se, lower, upper)
+    return IRFSummary(
+        term, level_f, scale_f,
+        collect(0:lp.horizon), beta, se, lower, upper
+    )
 end
 
 """
@@ -1527,11 +1584,13 @@ end
 
 Convenience method that computes vcov internally before creating summary table.
 """
-function summarize(lp::LPResult,
+function summarize(
+        lp::LPResult,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
+        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
+    )
     cov = vcov(estimator, lp)
-    summarize(lp, cov; term = term, level = level, scale = scale)
+    return summarize(lp, cov; term = term, level = level, scale = scale)
 end
 
 # ============================================================================
@@ -1623,14 +1682,18 @@ end
     return horizons, beta
 end
 
-@recipe function f(lp::LPResult, cov::LocalProjectionCovariance;
-        term = lp.shock, levels = [0.95])
+@recipe function f(
+        lp::LPResult, cov::LocalProjectionCovariance;
+        term = lp.shock, levels = [0.95]
+    )
     IRFPlot(lp, cov, term, Float64.(levels))
 end
 
-@recipe function f(lp::LPResult,
+@recipe function f(
+        lp::LPResult,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term = lp.shock, levels = [0.95])
+        term = lp.shock, levels = [0.95]
+    )
     cov = vcov(estimator, lp)
     IRFPlot(lp, cov, term, Float64.(levels))
 end
@@ -1670,10 +1733,12 @@ using Plots
 plot(irf)  # Uses MET's recipe
 ```
 """
-function as_irf_result(lp::LPResult;
+function as_irf_result(
+        lp::LPResult;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
-        coverage::Vector{Float64} = [0.68, 0.90, 0.95])
+        coverage::Vector{Float64} = [0.68, 0.9, 0.95]
+    )
     T = Float64
 
     # Extract coefficient path
@@ -1701,24 +1766,30 @@ function as_irf_result(lp::LPResult;
         )
 
         # Compute confidence bands as AxisArrays
-        lower = [AxisArray(
-                     reshape(beta .- quantile(Normal(), 0.5 + c/2) .* se, 1, 1, H),
-                     Axis{:response}([lp.response]),
-                     Axis{:shock}([term]),
-                     Axis{:horizon}(horizons)
-                 ) for c in coverage]
+        lower = [
+            AxisArray(
+                reshape(beta .- quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
+                Axis{:response}([lp.response]),
+                Axis{:shock}([term]),
+                Axis{:horizon}(horizons)
+            ) for c in coverage
+        ]
 
-        upper = [AxisArray(
-                     reshape(beta .+ quantile(Normal(), 0.5 + c/2) .* se, 1, 1, H),
-                     Axis{:response}([lp.response]),
-                     Axis{:shock}([term]),
-                     Axis{:horizon}(horizons)
-                 ) for c in coverage]
+        upper = [
+            AxisArray(
+                reshape(beta .+ quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
+                Axis{:response}([lp.response]),
+                Axis{:shock}([term]),
+                Axis{:horizon}(horizons)
+            ) for c in coverage
+        ]
     else
-        stderr_arr = AxisArray(zeros(T, 1, 1, H),
+        stderr_arr = AxisArray(
+            zeros(T, 1, 1, H),
             Axis{:response}([lp.response]),
             Axis{:shock}([term]),
-            Axis{:horizon}(horizons))
+            Axis{:horizon}(horizons)
+        )
         lower = [copy(stderr_arr) for _ in coverage]
         upper = [copy(stderr_arr) for _ in coverage]
     end

@@ -3,7 +3,7 @@ module LocalProjectionsMakieExt
 using Makie
 using LocalProjections
 using LocalProjections: LPResult, LocalProjectionCovariance,
-                        coefpath, stderror, vcov
+    coefpath, stderror, vcov
 using CovarianceMatrices
 using Distributions: Normal, quantile
 
@@ -93,7 +93,8 @@ function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
     xtickstep = pop!(kw, :xtickstep, 4)
     horizons = collect(0:lp.horizon)
     xticks_val = xtickstep > 0 ? (horizons[1]:xtickstep:horizons[end]) : Makie.automatic
-    ax = Makie.Axis(subfig[1, 1];
+    ax = Makie.Axis(
+        subfig[1, 1];
         xlabel = "Horizon",
         ylabel = string(term),
         title = title,

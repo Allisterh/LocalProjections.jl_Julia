@@ -35,7 +35,7 @@ using TestItems
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
@@ -72,7 +72,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Verify NaN handling (not missing)
@@ -114,7 +114,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
@@ -138,7 +138,7 @@ end
         pipe_coef = coef(lp_pipe.models[h + 1])[2]
         func_coef = coef(lp_func.models[h + 1])[2]
 
-        @test pipe_coef ≈ func_coef atol = 1e-10
+        @test pipe_coef ≈ func_coef atol = 1.0e-10
     end
 
     # Also verify against manual computation
@@ -160,7 +160,7 @@ end
         @test y_manual == y_manual_manual  # Verify manual matches StatsModels output
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
@@ -189,7 +189,7 @@ end
             elseif isnan(y_modelcols[i]) || isnan(y_manual[i])
                 @test false  # One NaN, other not - FAIL
             else
-                @test y_modelcols[i] ≈ y_manual[i] atol = 1e-10
+                @test y_modelcols[i] ≈ y_manual[i] atol = 1.0e-10
             end
         end
     end
@@ -228,7 +228,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
@@ -254,15 +254,17 @@ end
 
         # Manual computation: cumulative sum of log(y) from t to t+h
         log_y = log.(df_filtered1.y)
-        y_h = [t + h <= length(log_y) ? sum(log_y[t:(t + h)]) : NaN
-               for t in 1:length(log_y)]
+        y_h = [
+            t + h <= length(log_y) ? sum(log_y[t:(t + h)]) : NaN
+                for t in 1:length(log_y)
+        ]
         complete_obs = .!isnan.(y_h)
 
         X_manual = hcat(ones(sum(complete_obs)), df_filtered1.x[complete_obs])
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Test leads(log(y))
@@ -281,7 +283,7 @@ end
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Test anchor(log(y), z)
@@ -293,9 +295,11 @@ end
 
         # Manual computation: lead of log(y) by h, minus z at t
         log_y = log.(df_filtered3.y)
-        y_h = [t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
-               for
-               t in 1:length(log_y)]
+        y_h = [
+            t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
+                for
+                t in 1:length(log_y)
+        ]
         complete_obs = .!isnan.(y_h)
 
         X_manual = hcat(ones(sum(complete_obs)), df_filtered3.x[complete_obs])
@@ -303,7 +307,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Use relative tolerance for large values
-        @test lp_coef ≈ manual_coef rtol = 1e-10
+        @test lp_coef ≈ manual_coef rtol = 1.0e-10
     end
 end
 
@@ -338,7 +342,7 @@ end
 
     # Test with estimator directly
     summary_direct = summarize(lp_result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
 
     # Test confidence bounds are sensible (lower < coef < upper when se > 0)
     for i in 1:length(summary_obj.horizon)
@@ -348,8 +352,8 @@ end
     end
 
     # Test different confidence level
-    summary_90 = summarize(lp_result, cov; level = 0.90)
-    @test summary_90.level == 0.90
+    summary_90 = summarize(lp_result, cov; level = 0.9)
+    @test summary_90.level == 0.9
     # 90% CI should be narrower than 95% CI
     @test all(
         summary_90.upper .- summary_90.lower .< summary_obj.upper .- summary_obj.lower,
@@ -602,7 +606,7 @@ end
 
     # Test with estimator directly
     summary_direct = summarize(result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
 end
 
 @testitem "lpiv comparison with manual 2SLS" tags = [:lpiv, :iv, :verification] begin
@@ -640,7 +644,7 @@ end
     beta_2sls = (X_hat' * X_hat) \ (X_hat' * y_manual)
 
     # Compare coefficients (second element is x coefficient)
-    @test lpiv_coef ≈ beta_2sls[2] atol = 1e-8
+    @test lpiv_coef ≈ beta_2sls[2] atol = 1.0e-8
 end
 
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
