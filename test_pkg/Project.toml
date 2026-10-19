@@ -30,3 +30,9 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 TransformVariables = "84d833dd-6860-57f9-a1a7-6da5db126cff"
 TransformedLogDensities = "f9bc47f6-f3f8-4f3b-ab21-f8bc73906f26"
+
+[sources]
+LocalProjections = {path = "/Users/gragusa/workspace/LocalProjections.jl"}
+MacroEconometricTools = {rev = "main", url = "https://github.com/gragusa/MacroEconometricTools.jl"}
+MinimumDivergenceEstimators = {path = "../../MinimumDivergenceProblems.jl"}
+Regress = {path = "/Users/gragusa/workspace/Regress.jl"}

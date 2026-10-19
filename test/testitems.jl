@@ -332,7 +332,8 @@ end
     summary_df = DataFrame(summary_obj)
     @test summary_df isa DataFrame
     @test nrow(summary_df) == 6
-    @test names(summary_df) == ["horizon", "coef", "se", "lower", "upper"]
+    @test names(summary_df) ==
+        ["response", "term", "horizon", "coef", "se", "lower", "upper", "level", "scale"]
 
     # Test with scale
     summary_scaled = summarize(lp_result; scale = 100)
@@ -359,6 +360,52 @@ end
     @test all(
         summary_90.upper .- summary_90.lower .< summary_obj.upper .- summary_obj.lower,
     )
+end
+
+@testitem "IRFSummary table, display and level validation" tags = [:summarize, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Tables, Test
+    using MacroEconometricTools: point_estimate, lowerbounds, upperbounds
+
+    x = sin.(0.3 .* (1:80))
+    df = DataFrame(x = x, y = 0.5 .* x .+ cos.(1:80))
+    r = lp(@formula(leads(y) ~ x), df; horizon = 4)
+    s = summarize(r; level = 0.9)
+
+    # Tables.jl interface carries every field, one row per horizon
+    @test Tables.istable(s)
+    ct = Tables.columntable(s)
+    @test ct.horizon == 0:4
+    @test all(==(:y), ct.response) && all(==(:x), ct.term)
+    @test all(==(0.9), ct.level) && all(==(1.0), ct.scale)
+    @test ct.coef == s.coef && ct.lower == s.lower
+
+    # Same numbers as the MET IRF object at that coverage
+    irf = as_irf_result(r; coverage = [0.9])
+    @test s.coef == vec(Array(point_estimate(irf)))
+    @test s.lower == vec(Array(only(lowerbounds(irf))))
+    @test s.upper == vec(Array(only(upperbounds(irf))))
+
+    # A negative scale flips the response and keeps lower <= upper
+    sneg = summarize(r; level = 0.9, scale = -2)
+    @test sneg.coef ≈ -2 .* s.coef
+    @test sneg.se ≈ 2 .* s.se
+    @test sneg.lower ≈ -2 .* s.upper
+    @test sneg.upper ≈ -2 .* s.lower
+
+    # Display: no ANSI codes unless the caller asks for color; compact form has no newline
+    plain = sprint(show, MIME("text/plain"), s)
+    @test !occursin('\e', plain)
+    @test occursin("Impulse response of y to x", plain)
+    @test occursin("Lower 90%", plain)
+    @test !occursin("0.0 │", plain)  # horizons print as integers
+    @test sprint(show, s) == "IRFSummary(response=y, term=x, level=0.9, scale=1.0)"
+
+    # One validation of confidence levels for every entry point
+    msg = "confidence levels must lie strictly between 0 and 1; got 95"
+    @test_throws msg summarize(r; level = 95)
+    @test_throws msg as_irf_result(r; coverage = [0.9, 95])
+    @test_throws "at least one confidence level is required" as_irf_result(r; coverage = Float64[])
 end
 
 @testitem "plus vcov operator" tags = [:vcov, :api] begin
@@ -425,9 +472,12 @@ end
     @test summarize(r_hac).se ≈ summarize(r, hac).se
     @test summarize(r_hac, HC1()).se ≈ summarize(r).se
 
-    # `show` reports the stored estimator
-    @test occursin("Vcov:       HR1()", sprint(show, MIME"text/plain"(), r))
-    @test occursin("Bartlett{NeweyWest}()", sprint(show, MIME"text/plain"(), r_hac))
+    # `show` reports the stored estimator; `repr` module-qualifies the names unless
+    # CovarianceMatrices is loaded in `Main`
+    @test occursin(r"Vcov: +(CovarianceMatrices\.)?HR1\(\)", sprint(show, MIME"text/plain"(), r))
+    @test occursin(
+        r"Bartlett\{(CovarianceMatrices\.)?NeweyWest\}\(\)", sprint(show, MIME"text/plain"(), r_hac)
+    )
 end
 
 @testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin

@@ -7,9 +7,8 @@ export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
 export irfplot, irfplot!, irfplot_axis
 
-using DataFrames: DataFrames, DataFrame
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
-    text_table_borders__unicode_rounded, fmt__round, @crayon_str
+    text_table_borders__unicode_rounded, @crayon_str
 using Tables: Tables
 using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, term
@@ -23,7 +22,8 @@ using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
 using AxisArrays: AxisArrays, AxisArray, Axis
-using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
+using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!, point_estimate,
+    lowerbounds, upperbounds, coverages
 
 # ============================================================================
 # Helper Functions for Common Patterns
@@ -1068,11 +1068,17 @@ end
 """
     IRFSummary
 
-Summary of impulse response function with coefficients, standard errors,
-and confidence intervals. Displays with PrettyTables, highlighting
-statistically significant coefficients in bold.
+Impulse response of `response` to `term` at horizons `0:H`: coefficients, standard
+errors and `level` confidence bounds, all multiplied by `scale`. Built by
+[`summarize`](@ref).
+
+An `IRFSummary` is a Tables.jl table with one row per horizon and columns `response`,
+`term`, `horizon`, `coef`, `se`, `lower`, `upper`, `level`, `scale`, so
+`DataFrame(summarize(lp))` works. Its text display marks in bold the horizons whose
+confidence interval excludes zero, when the output supports color.
 """
 struct IRFSummary
+    response::Symbol
     term::Symbol
     level::Float64
     scale::Float64
@@ -1083,69 +1089,50 @@ struct IRFSummary
     upper::Vector{Float64}
 end
 
-# Convert to DataFrame for data access
-function DataFrames.DataFrame(s::IRFSummary)
-    return DataFrame(
-        horizon = s.horizon,
-        coef = s.coef,
-        se = s.se,
-        lower = s.lower,
-        upper = s.upper
+Tables.istable(::Type{IRFSummary}) = true
+Tables.columnaccess(::Type{IRFSummary}) = true
+
+function Tables.columns(s::IRFSummary)
+    n = length(s.horizon)
+    return (
+        response = fill(s.response, n), term = fill(s.term, n), horizon = s.horizon,
+        coef = s.coef, se = s.se, lower = s.lower, upper = s.upper,
+        level = fill(s.level, n), scale = fill(s.scale, n),
     )
 end
 
 function Base.show(io::IO, s::IRFSummary)
-    return println(io, "IRFSummary(term=$(s.term), level=$(s.level), scale=$(s.scale))")
+    return print(
+        io, "IRFSummary(response=$(s.response), term=$(s.term), level=$(s.level), scale=$(s.scale))"
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", s::IRFSummary)
-    # Determine significance: CI doesn't include zero
     significant = (s.lower .> 0) .| (s.upper .< 0)
+    data = Any[s.horizon s.coef s.se s.lower s.upper]
+    level_pct = round(s.level * 100; digits = 2)
+    level_str = isinteger(level_pct) ? string(Int(level_pct)) : string(level_pct)
+    labels = ["Horizon", "Coef", "Std.Err.", "Lower $level_str%", "Upper $level_str%"]
 
-    # Create data matrix for PrettyTables
-    data = hcat(s.horizon, s.coef, s.se, s.lower, s.upper)
-
-    # Format the level as percentage
-    level_pct = round(Int, s.level * 100)
-
-    # Column labels (PrettyTables v3 API)
-    labels = ["Horizon", "Coef", "Std.Err.", "Lower $level_pct%", "Upper $level_pct%"]
-
-    # Highlighters for bold significant values (PrettyTables v3 API)
-    # Make coef, lower, upper bold when significant
-    hl_coef = TextHighlighter(
-        (d, i, j) -> j == 2 && significant[i],
-        crayon"bold"
-    )
-    hl_lower = TextHighlighter(
-        (d, i, j) -> j == 4 && significant[i],
-        crayon"bold"
-    )
-    hl_upper = TextHighlighter(
-        (d, i, j) -> j == 5 && significant[i],
+    # Bold coef, lower and upper where the interval excludes zero
+    hl = TextHighlighter(
+        (d, i, j) -> j in (2, 4, 5) && significant[i],
         crayon"bold"
     )
 
-    # Title
-    title = "Impulse Response: $(s.term)"
+    title = "Impulse response of $(s.response) to $(s.term)"
     if s.scale != 1.0
         title *= " (scale=$(s.scale))"
     end
 
-    # Table format with rounded borders
-    table_fmt = TextTableFormat(borders = text_table_borders__unicode_rounded)
-
-    # Enable color output for ANSI bold codes
-    ioc = IOContext(io, :color => true)
-
     return pretty_table(
-        ioc, data;
+        io, data;
         column_labels = labels,
         title = title,
-        highlighters = [hl_coef, hl_lower, hl_upper],
-        formatters = [fmt__round(4)],
+        highlighters = [hl],
+        formatters = [(v, i, j) -> v isa AbstractFloat ? round(v; digits = 4) : v],
         alignment = [:r, :r, :r, :r, :r],
-        table_format = table_fmt
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded)
     )
 end
 
@@ -1455,7 +1442,9 @@ _vcov_estimator(lp::AbstractLocalProjection) = horizonmodel(lp, 0).vcov_estimato
     summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
 
 Table of the impulse response of `term` with standard errors and `level` confidence
-intervals, all multiplied by `scale`.
+intervals, all multiplied by `scale`; `level` must lie strictly between 0 and 1. The
+numbers are those of [`as_irf_result`](@ref) with `coverage = [level]`. A negative
+`scale` flips the sign of the response, and the bounds swap so that `lower <= upper`.
 
 Standard errors come from the covariance estimator stored in `lp` (see
 [`stderror`](@ref)). Passing a CovarianceMatrices.jl `estimator` is the same as
@@ -1465,17 +1454,19 @@ function summarize(
         lp::AbstractLocalProjection;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
     )
-    level_f = Float64(level)
+    irf = _irf_result(lp, term, (level,); diagnostics = false)
     scale_f = Float64(scale)
-    beta = coefpath(lp; term = term) .* scale_f
-    se = stderror(lp; term = term) .* scale_f
-    z = quantile(Normal(), 0.5 + level_f / 2)
-    lower = beta .- z .* se
-    upper = beta .+ z .* se
-
+    lower = scale_f .* _horizon_vector(only(lowerbounds(irf)))
+    upper = scale_f .* _horizon_vector(only(upperbounds(irf)))
+    # A negative scale reverses the order of the bounds
+    if scale_f < 0
+        lower, upper = upper, lower
+    end
     return IRFSummary(
-        term, level_f, scale_f,
-        collect(0:lp.horizon), beta, se, lower, upper
+        lp.response, term, only(coverages(irf)), scale_f, collect(0:lp.horizon),
+        scale_f .* _horizon_vector(point_estimate(irf)),
+        abs(scale_f) .* _horizon_vector(irf.stderr),
+        lower, upper
     )
 end
 
@@ -1597,13 +1588,16 @@ end
 Convert a `LocalProjection` or `LocalProjectionIV` result to MET's `LocalProjectionIRFResult` type.
 
 This enables using MET's unified plotting infrastructure with AxisArray support.
-For IV results, first-stage diagnostics are included in metadata.
+Bands are `coef ± z * se`, with `z` the standard normal quantile for each coverage level
+and `se` from the covariance estimator. For IV results, first-stage diagnostics are
+included in metadata.
 
 # Keyword Arguments
 - `term::Symbol=lp.shock`: Which coefficient to extract (defaults to shock variable)
 - `vcov_estimator=nothing`: Covariance estimator for standard errors and bands (e.g.,
   `HR1()`); `nothing` uses the estimator stored in `lp` (see [`stderror`](@ref))
-- `coverage::Vector{Float64}=[0.68, 0.90, 0.95]`: Confidence levels for bands
+- `coverage=[0.68, 0.90, 0.95]`: confidence levels for the bands, each strictly between
+  0 and 1
 
 # Returns
 - `LocalProjectionIRFResult`: MET-compatible IRF result with AxisArray data
@@ -1627,61 +1621,52 @@ function as_irf_result(
         lp::AbstractLocalProjection;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
-        coverage::Vector{Float64} = [0.68, 0.9, 0.95]
+        coverage = [0.68, 0.9, 0.95]
     )
-    T = Float64
-
-    # Extract coefficient path
-    beta = coefpath(lp; term = term)
-    H = length(beta)
-    horizons = 0:(H - 1)
-
-    # Build AxisArray with named dimensions
-    data = AxisArray(
-        reshape(beta, 1, 1, H),
-        Axis{:response}([lp.response]),
-        Axis{:shock}([term]),
-        Axis{:horizon}(horizons)
-    )
-
-    se = stderror(vcov_estimator === nothing ? lp : lp + vcov(vcov_estimator); term = term)
-
-    stderr_arr = AxisArray(
-        reshape(se, 1, 1, H),
-        Axis{:response}([lp.response]),
-        Axis{:shock}([term]),
-        Axis{:horizon}(horizons)
-    )
-
-    # Compute confidence bands as AxisArrays
-    lower = [
-        AxisArray(
-            reshape(beta .- quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
-            Axis{:response}([lp.response]),
-            Axis{:shock}([term]),
-            Axis{:horizon}(horizons)
-        ) for c in coverage
-    ]
-
-    upper = [
-        AxisArray(
-            reshape(beta .+ quantile(Normal(), 0.5 + c / 2) .* se, 1, 1, H),
-            Axis{:response}([lp.response]),
-            Axis{:shock}([term]),
-            Axis{:horizon}(horizons)
-        ) for c in coverage
-    ]
-
-    # Build metadata, adding IV-specific fields when applicable
-    meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
-    if lp isa LocalProjectionIV
-        fs_diagnostics = [first_stage(lp, h) for h in 0:(H - 1)]
-        meta = (meta..., is_iv = true, first_stage = fs_diagnostics)
+    if vcov_estimator !== nothing
+        return as_irf_result(lp + vcov(vcov_estimator); term, coverage)
     end
+    return _irf_result(lp, term, coverage; diagnostics = true)
+end
 
-    return LocalProjectionIRFResult{T, typeof(data)}(
-        data, stderr_arr, lower, upper, coverage, meta
+function _check_levels(levels)
+    isempty(levels) && throw(ArgumentError("at least one confidence level is required"))
+    for c in levels
+        0 < c < 1 || throw(
+            ArgumentError("confidence levels must lie strictly between 0 and 1; got $c")
+        )
+    end
+    return nothing
+end
+
+# The response × shock × horizon cube of a single (response, term) pair, as a vector
+# over horizons 0:H.
+_horizon_vector(a::AxisArray) = vec(Array(a))
+
+# Coefficient path, standard errors and normal confidence bands for `term` at each level
+# in `coverage`, using the covariance estimator stored in `lp`. Every confidence bound
+# the package reports (`summarize`, `as_irf_result`) is computed here. With
+# `diagnostics = true`, IV results also carry the first-stage regressions per horizon.
+function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool)
+    levels = collect(Float64, coverage)
+    _check_levels(levels)
+    beta = coefpath(lp; term)
+    se = stderror(lp; term)
+    cube(v) = AxisArray(
+        reshape(v, 1, 1, length(v)),
+        Axis{:response}([lp.response]),
+        Axis{:shock}([term]),
+        Axis{:horizon}(0:lp.horizon)
     )
+    z = [quantile(Normal(), 0.5 + c / 2) for c in levels]
+    lower = [cube(beta .- zc .* se) for zc in z]
+    upper = [cube(beta .+ zc .* se) for zc in z]
+
+    meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
+    if diagnostics && lp isa LocalProjectionIV
+        meta = (meta..., is_iv = true, first_stage = [first_stage(lp, h) for h in 0:lp.horizon])
+    end
+    return LocalProjectionIRFResult(cube(beta), cube(se), lower, upper, levels, meta)
 end
 
 end # module LocalProjections
