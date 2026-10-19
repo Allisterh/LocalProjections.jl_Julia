@@ -18,7 +18,7 @@ using TestItems
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient (index 2, after intercept)
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient (index 2, after intercept)
 
         # Manually compute cumulative y at horizon h using StatsModels
         cumul_term_h = CumulTerm{typeof(Term(:y))}(Term(:y), h)
@@ -57,7 +57,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient
 
         # Manually compute lead of y at horizon h using StatsModels
         leads_term_h = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -98,7 +98,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient
 
         # Manually compute anchored response using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -135,8 +135,8 @@ end
 
     # Compare results from both syntaxes
     for h in 0:horizon
-        pipe_coef = coef(lp_pipe.models[h + 1])[2]
-        func_coef = coef(lp_func.models[h + 1])[2]
+        pipe_coef = coef(horizonmodel(lp_pipe, h))[2]
+        func_coef = coef(horizonmodel(lp_func, h))[2]
 
         @test pipe_coef ≈ func_coef atol = 1.0e-10
     end
@@ -145,7 +145,7 @@ end
     df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_pipe.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_pipe, h))[2]
 
         # Manual computation using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -212,7 +212,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_result, h))[2]
 
         # Manual computation using StatsModels: first cumul, then anchor
         inner_cumul = CumulTerm{typeof(Term(:y))}(Term(:y), h)
@@ -250,7 +250,7 @@ end
     df_filtered1 = dropmissing(df, [:y, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_cumul_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_cumul_log, h))[2]
 
         # Manual computation: cumulative sum of log(y) from t to t+h
         log_y = log.(df_filtered1.y)
@@ -272,7 +272,7 @@ end
     df_filtered2 = dropmissing(df, [:y, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_lead_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_lead_log, h))[2]
 
         # Manual computation: lead of log(y) by h
         log_y = log.(df_filtered2.y)
@@ -291,7 +291,7 @@ end
     df_filtered3 = dropmissing(df, [:y, :z, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_anchor_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_anchor_log, h))[2]
 
         # Manual computation: lead of log(y) by h, minus z at t
         log_y = log.(df_filtered3.y)
@@ -388,7 +388,7 @@ end
     @test lp_robust.coef_names == lp_result.coef_names
 
     # Number of models should be the same
-    @test length(lp_robust.models) == length(lp_result.models)
+    @test length(nobs(lp_robust)) == length(nobs(lp_result))
 
     # Test chaining: (lp + vcov(A)) + vcov(B)
     lp_chained = (lp_result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
@@ -426,7 +426,7 @@ end
     @test result.shock == :x
 
     # Check that we have the right number of models
-    @test length(result.models) == horizon + 1
+    @test length(nobs(result)) == horizon + 1
 
     # Check endogenous and instrument names
     @test :x in Symbol.(result.endogenous_names) || "x" in result.endogenous_names
@@ -680,8 +680,8 @@ end
     @test all(r -> r.F_eff > 0, results)
 
     # Test bounds checking
-    @test_throws BoundsError weakivtest(result, -1)
-    @test_throws BoundsError weakivtest(result, horizon + 1)
+    @test_throws "horizon -1 is outside the estimated horizons 0:$horizon" weakivtest(result, -1)
+    @test_throws "horizon $(horizon + 1) is outside the estimated horizons 0:$horizon" first_stage(result, horizon + 1)
 
     # Test keyword forwarding
     r_ols = weakivtest(result, 0; benchmark = :ols)
@@ -715,7 +715,7 @@ end
         df; horizon = horizon
     )
     @test result isa LocalProjectionIV
-    @test length(result.models) == horizon + 1
+    @test length(nobs(result)) == horizon + 1
 
     # Verify coefficients are finite
     irf = coefpath(result; term = :x)
@@ -889,7 +889,7 @@ end
     r_df = lp(f, df; horizon = H)
     r_nt = lp(f, (; y, x, z, w); horizon = H)
     @test coefpath(r_nt) == coefpath(r_df)
-    @test nobs.(r_nt.models) == nobs.(r_df.models)
+    @test nobs(r_nt) == nobs(r_df)
     fiv = @formula(cumul(y) ~ (x ~ z) + w)
     @test coefpath(lpiv(TSLS(), fiv, Tables.rowtable(df); horizon = H)) ==
         coefpath(lpiv(TSLS(), fiv, df; horizon = H))
@@ -899,7 +899,7 @@ end
     rc = lp(@formula(leads(y) ~ x + g), df; horizon = 1)
     @test rc.coef_names == ["(Intercept)", "x", "g: b", "g: c"]
     Xg = hcat(ones(n), x, g .== "b", g .== "c")
-    @test coef(rc.models[1]) ≈ Xg \ y
+    @test coef(horizonmodel(rc, 0)) ≈ Xg \ y
     riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + g), df; horizon = 1)
     @test riv.coef_names == ["(Intercept)", "g: b", "g: c", "x"]
     g_miss = allowmissing(g)
@@ -913,26 +913,26 @@ end
     y_miss = allowmissing(y)
     y_miss[50] = missing
     rm = lp(@formula(leads(y) ~ x), DataFrame(; y = y_miss, x); horizon = 2)
-    @test nobs.(rm.models) == [n - 1, n - 2, n - 3]
+    @test nobs(rm) == [n - 1, n - 2, n - 3]
     for h in 0:2
         keep = [t + h <= n && !ismissing(y_miss[t + h]) for t in 1:n]
         y_h = Float64[y_miss[t + h] for t in 1:n if keep[t]]
-        @test coef(rm.models[h + 1]) ≈ hcat(ones(sum(keep)), x[keep]) \ y_h
+        @test coef(horizonmodel(rm, h)) ≈ hcat(ones(sum(keep)), x[keep]) \ y_h
     end
 
     # Fixed sample: every horizon uses the rows available at all horizons
     r_fix = lp(f, df; horizon = H, sample = :fixed)
     @test r_fix.sample === :fixed
     @test r_df.sample === :varying
-    @test allequal(nobs.(r_fix.models))
-    @test nobs(r_fix.models[1]) == n - 2 - H  # two lags at the start, H leads at the end
-    @test coef(r_fix.models[H + 1]) ≈ coef(r_df.models[H + 1])
+    @test allequal(nobs(r_fix))
+    @test nobs(horizonmodel(r_fix, 0)) == n - 2 - H  # two lags at the start, H leads at the end
+    @test coef(horizonmodel(r_fix, H)) ≈ coef(horizonmodel(r_df, H))
     rows = 3:(n - H)
     X_fix = hcat(ones(length(rows)), x[rows], w[rows .- 1], w[rows .- 2])
-    @test coef(r_fix.models[1]) ≈ X_fix \ y[rows]
+    @test coef(horizonmodel(r_fix, 0)) ≈ X_fix \ y[rows]
     riv_fix = lpiv(TSLS(), fiv, df; horizon = H, sample = :fixed)
     @test riv_fix.sample === :fixed
-    @test allequal(nobs.(riv_fix.models))
+    @test allequal(nobs(riv_fix))
     @test riv_fix.sample === (riv_fix + vcov(HC1())).sample
 
     msg = "sample must be :varying or :fixed (got :all)"
@@ -942,6 +942,34 @@ end
     # Per-horizon sample sizes are displayed
     shown = sprint(show, MIME"text/plain"(), r_df)
     @test occursin("Sample:     varying", shown)
-    @test occursin("Obs (h=0:$H): $(join(nobs.(r_df.models), ", "))", shown)
+    @test occursin("Obs (h=0:$H): $(join(nobs(r_df), ", "))", shown)
     @test occursin("Sample:       fixed", sprint(show, MIME"text/plain"(), riv_fix))
+end
+
+@testitem "Horizon-indexed model access" tags = [:api, :core] begin
+    using DataFrames, StatsBase, StatsModels
+    using StableRNGs
+
+    rng = StableRNG(20261021)
+    n = 120
+    x = randn(rng, n)
+    z = x .+ randn(rng, n)
+    y = cumsum(randn(rng, n)) .+ 0.5 .* x
+    df = DataFrame(; y, x, z)
+    H = 3
+
+    r = lp(@formula(leads(y) ~ x), df; horizon = H)
+    ix = findfirst(==("x"), coefnames(r))
+    @test coefnames(r) == ["(Intercept)", "x"]
+    @test [coef(horizonmodel(r, h))[ix] for h in 0:H] == coefpath(r)
+    @test nobs(r) == [nobs(horizonmodel(r, h)) for h in 0:H] == [n - h for h in 0:H]
+    @test horizonmodel(r, Int32(2)) === horizonmodel(r, 2)
+    @test_throws "horizon -1 is outside the estimated horizons 0:3" horizonmodel(r, -1)
+    @test_throws "horizon 4 is outside the estimated horizons 0:3" horizonmodel(r, H + 1)
+    @test_throws MethodError coefnames(r, 0)
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = H)
+    @test [coef(horizonmodel(riv, h))[ix] for h in 0:H] == coefpath(riv)
+    @test nobs(riv) == [n - h for h in 0:H]
+    @test_throws "horizon 4 is outside the estimated horizons 0:3" horizonmodel(riv, H + 1)
 end

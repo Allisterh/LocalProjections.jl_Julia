@@ -1,7 +1,7 @@
 module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
-export lp, lpiv, TSLS, coefpath, stderror, vcov, summarize, first_stage, weakivtest
+export lp, lpiv, TSLS, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
@@ -21,7 +21,7 @@ using Statistics: quantile
 using Distributions: Normal
 using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
-using StatsBase: StatisticalModel, coef, nobs, response
+using StatsBase: StatsBase, StatisticalModel, coef, nobs, response
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
 
@@ -476,8 +476,53 @@ end
 Supertype of local projection results: [`LocalProjection`](@ref) (OLS, from
 [`lp`](@ref)) and [`LocalProjectionIV`](@ref) (IV, from [`lpiv`](@ref)). Each holds
 one fitted Regress.jl model per horizon `0:horizon`.
+
+Per-horizon models are reached with [`horizonmodel`](@ref); [`coefnames`](@ref) and
+[`nobs`](@ref) give the coefficient names and the sample size at each horizon.
 """
 abstract type AbstractLocalProjection end
+
+"""
+    horizonmodel(lp::AbstractLocalProjection, h::Integer)
+
+Return the fitted Regress.jl model for horizon `h`, where `0 ≤ h ≤ lp.horizon`.
+
+The model supports the StatsAPI accessors (`coef`, `vcov`, `stderror`, `nobs`, ...).
+Its coefficients are ordered as in `coefnames(lp)`. When the response is the shock,
+the model at `h = 0` regresses the shock on itself; [`coefpath`](@ref) reports the
+exact values (1 for the shock, 0 for other terms) at that horizon instead.
+
+Throws an `ArgumentError` when `h` is outside `0:lp.horizon`.
+
+# Example
+```julia
+r = lp(@formula(leads(y) ~ x), df; horizon = 8)
+m = horizonmodel(r, 4)
+coef(m)[findfirst(==("x"), coefnames(r))]
+```
+"""
+function horizonmodel(lp::AbstractLocalProjection, h::Integer)
+    0 <= h <= lp.horizon ||
+        throw(ArgumentError("horizon $h is outside the estimated horizons 0:$(lp.horizon)"))
+    return lp.models[h + 1]
+end
+
+"""
+    coefnames(lp::AbstractLocalProjection) -> Vector{String}
+
+Coefficient names of the per-horizon models. Every horizon has the same right-hand
+side, so one vector serves all horizons.
+"""
+StatsModels.coefnames(lp::AbstractLocalProjection) = lp.coef_names
+
+"""
+    nobs(lp::AbstractLocalProjection) -> Vector{Int}
+
+Number of observations used at each horizon; element `h + 1` belongs to horizon `h`.
+With `sample = :varying` the count typically falls as `h` grows; with `sample = :fixed`
+all entries are equal.
+"""
+StatsBase.nobs(lp::AbstractLocalProjection) = [nobs(m) for m in lp.models]
 
 """
     LocalProjection
@@ -495,22 +540,6 @@ struct LocalProjection{M <: OLSMatrixEstimator} <: AbstractLocalProjection
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
 end
 
-"""
-    coefnames(lp::LocalProjection)
-
-Return the coefficient names for the local projection models.
-Since all horizons share the same RHS, returns a single set of coefficient names.
-"""
-StatsModels.coefnames(lp::LocalProjection) = lp.coef_names
-
-"""
-    coefnames(lp::LocalProjection, h::Int)
-
-Return the coefficient names for horizon `h` (0-indexed).
-Since all horizons share the same RHS, returns the same names regardless of `h`.
-"""
-StatsModels.coefnames(lp::LocalProjection, h::Int) = lp.coef_names
-
 function Base.show(io::IO, lp::LocalProjection)
     return print(io, "LocalProjection(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))")
 end
@@ -523,7 +552,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Formula:    $(lp.base_formula)")
     println(io, "  Coef names: $(lp.coef_names)")
     println(io, "  Sample:     $(lp.sample)")
-    return println(io, "  Obs (h=0:$(lp.horizon)): $(join(nobs.(lp.models), ", "))")
+    return println(io, "  Obs (h=0:$(lp.horizon)): $(join(nobs(lp), ", "))")
 end
 
 """
@@ -1164,22 +1193,6 @@ struct LocalProjectionIV{M <: IVMatrixEstimator} <: AbstractLocalProjection
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
 end
 
-"""
-    coefnames(lpiv::LocalProjectionIV)
-
-Return the coefficient names for the local projection IV models.
-Since all horizons share the same RHS, returns a single set of coefficient names.
-"""
-StatsModels.coefnames(lpiv::LocalProjectionIV) = lpiv.coef_names
-
-"""
-    coefnames(lpiv::LocalProjectionIV, h::Int)
-
-Return the coefficient names for horizon `h` (0-indexed).
-Since all horizons share the same RHS, returns the same names regardless of `h`.
-"""
-StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names
-
 function Base.show(io::IO, lpiv::LocalProjectionIV)
     return print(
         io,
@@ -1197,7 +1210,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Instruments:  $(lpiv.instrument_names)")
     println(io, "  Coef names:   $(lpiv.coef_names)")
     println(io, "  Sample:       $(lpiv.sample)")
-    return println(io, "  Obs (h=0:$(lpiv.horizon)): $(join(nobs.(lpiv.models), ", "))")
+    return println(io, "  Obs (h=0:$(lpiv.horizon)): $(join(nobs(lpiv), ", "))")
 end
 
 """
@@ -1329,10 +1342,8 @@ fs.F_robust           # robust F using the model's current vcov
 ```
 """
 function Regress.first_stage(lpiv::LocalProjectionIV, h::Int)
-    0 <= h <= lpiv.horizon ||
-        throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
     return Regress.first_stage(
-        lpiv.models[h + 1];
+        horizonmodel(lpiv, h);
         endogenous_names = lpiv.endogenous_names,
         instrument_names = lpiv.instrument_names
     )
@@ -1358,13 +1369,12 @@ A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
 See also: [`lpiv`](@ref), [`first_stage`](@ref)
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
-    0 <= h <= lpiv.horizon ||
-        throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    m = horizonmodel(lpiv, h)
     if h == 0 && lpiv.tautological_h0
         @info "weakivtest at h=0 skipped: response == shock (tautological)"
-        return _tautological_weakivtest(lpiv.models[1]; kwargs...)
+        return _tautological_weakivtest(m; kwargs...)
     end
-    return Regress.weakivtest(lpiv.models[h + 1]; kwargs...)
+    return Regress.weakivtest(m; kwargs...)
 end
 
 """
