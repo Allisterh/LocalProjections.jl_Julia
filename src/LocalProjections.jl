@@ -7,23 +7,20 @@ export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
 export irfplot, irfplot!, irfplot_axis
 
-using DataFrames
+using DataFrames: DataFrames, AbstractDataFrame, DataFrame, dropmissing, nrow
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, fmt__round, @crayon_str
-using Tables
-using StatsModels
-using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
-    ContinuousTerm, coefnames
-using Regress
-using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-    WeakIVTestResult, FirstStageIV, lags, LagTerm,
-    first_stage, weakivtest
-using CovarianceMatrices
-using Statistics
-using Distributions
-using RecipesBase
+using Tables: Tables
+using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
+    FormulaTerm, coefnames, term
+using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
+    VcovSpec, WeakIVTestResult, FirstStageIV, lags, first_stage, weakivtest
+using CovarianceMatrices: CovarianceMatrices
+using Statistics: quantile, var
+using Distributions: Normal
+using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
-using StatsBase
+using StatsBase: StatisticalModel, coef, nobs, response
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
 
