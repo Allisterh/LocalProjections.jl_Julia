@@ -1324,6 +1324,10 @@ end
 
 Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
 
+When the response is the endogenous shock, horizon 0 is tautological (the coefficient
+is exactly 1) and there is no IV estimate to test; `weakivtest(lpiv, 0)` then throws an
+`ArgumentError`. `first_stage(lpiv, 0)` remains available.
+
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
 - `eps::Real=0.001`: Convergence tolerance for bias optimization
@@ -1337,49 +1341,31 @@ See also: [`lpiv`](@ref), [`first_stage`](@ref)
 function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
     m = horizonmodel(lpiv, h)
     if h == 0 && lpiv.tautological_h0
-        @info "weakivtest at h=0 skipped: response == shock (tautological)"
-        return _tautological_weakivtest(m; kwargs...)
+        throw(
+            ArgumentError(
+                "weakivtest is undefined at horizon 0 when the response equals the shock " *
+                    "($(lpiv.shock)): the horizon-0 coefficient is 1 by construction. " *
+                    "Use first_stage(lpiv, 0) for first-stage diagnostics."
+            )
+        )
     end
     return Regress.weakivtest(m; kwargs...)
 end
 
 """
-    weakivtest(lpiv::LocalProjectionIV; kwargs...) -> Vector{WeakIVTestResult}
+    weakivtest(lpiv::LocalProjectionIV; kwargs...) -> Vector
 
 Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
-Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
+Returns a vector with one `WeakIVTestResult` per horizon `0:lpiv.horizon`. When the
+response is the endogenous shock, the entry for horizon 0 is `nothing` (see
+`weakivtest(lpiv, h)`), so the vector stays aligned with the horizons.
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
-    results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
-    for (i, m) in enumerate(lpiv.models)
-        if i == 1 && lpiv.tautological_h0
-            results[1] = _tautological_weakivtest(m; kwargs...)
-        else
-            results[i] = Regress.weakivtest(m; kwargs...)
-        end
-    end
-    return results
-end
-
-# Sentinel WeakIVTestResult for tautological h=0 (response == shock)
-function _tautological_weakivtest(model; level = 0.05, kwargs...)
-    T = Float64
-    nan4 = (NaN, NaN, NaN, NaN)
-    N = nobs(model)
-    n_endo = model.postestimation.n_endogenous
-    k_z = size(model.postestimation.Z, 2)
-    k_x = size(model.postestimation.X, 2)
-    K = k_z - k_x + n_endo  # number of excluded instruments
-    return WeakIVTestResult{T}(
-        Inf, Inf, Inf,          # F_eff, F_nonrobust, F_robust
-        1.0, 0.0,               # btsls, sebtsls
-        1.0, 0.0,               # bliml, sebliml
-        1.0, 0.0,               # bgmmf, sebgmmf
-        1.0,                    # kappa
-        nan4, nan4, nan4,       # cv_TSLS, cv_LIML, cv_GMMf
-        T(level), K, N
-    )
+    return [
+        h == 0 && lpiv.tautological_h0 ? nothing : weakivtest(lpiv, h; kwargs...)
+            for h in 0:lpiv.horizon
+    ]
 end
 
 # ============================================================================

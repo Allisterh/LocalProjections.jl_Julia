@@ -851,19 +851,18 @@ end
     @test summary.lower[1] == 1.0
     @test summary.upper[1] == 1.0
 
-    # weakivtest: should not error, h=0 returns sentinel with F_eff = Inf
+    # weakivtest: h=0 has no IV estimate to test
     wiv = weakivtest(result)
     @test length(wiv) == horizon + 1
-    @test wiv[1].F_eff == Inf
+    @test wiv[1] === nothing
     @test all(r -> isfinite(r.F_eff), wiv[2:end])
+    @test_throws ArgumentError weakivtest(result, 0)
+    @test_throws "weakivtest is undefined at horizon 0 when the response equals the shock (x)" weakivtest(result, 0)
+    @test wiv[2].F_eff == weakivtest(result, 1).F_eff
+    @test isfinite(weakivtest(result, 1).F_eff)
 
-    # Single-horizon weakivtest at h=0
-    wiv0 = weakivtest(result, 0)
-    @test wiv0.F_eff == Inf
-
-    # Single-horizon weakivtest at h>0 should work normally
-    wiv1 = weakivtest(result, 1)
-    @test isfinite(wiv1.F_eff)
+    # first_stage at h=0 is still available
+    @test first_stage(result, 0) isa LocalProjections.FirstStageIV
 
     # OLS LP where response == shock
     ols_result = lp(@formula(leads(x) ~ x + w), df; horizon = horizon)
