@@ -1,27 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+This release breaks the 0.1 API. No deprecation shims are provided.
 
 ### Added
 
-- **`xtickstep` kwarg for Makie extension**: The `IRFPlotMakie` recipe now supports `xtickstep` (x-axis tick spacing).
-
-- **`irfplot_axis` applies `xtickstep`**: The convenience wrapper now sets x-axis ticks and limits based on the `xtickstep` keyword argument.
-
-### Removed
-
-- **`irf_scale` and `flipshock` from plotting**: The Makie extension and RecipesBase recipes no longer accept `irf_scale` or `flipshock`. Use `rescale` from MacroEconometricTools.jl to scale results before plotting.
+- **Panel local projections**: `lp` and `lpiv` accept `unit` and `time` column names. Rows are sorted by unit and time, and leads, cumulative sums, anchors and lags are built within each unit. Repeated (unit, time) pairs, a unit that skips a period present elsewhere in the data, missing or NaN identifiers, and `unit` without `time` are errors. Panel results default to `CR1(unit)` standard errors.
+- **Clustered and Driscoll-Kraay inference by column name**: `lp + vcov(CR1(:id))` and `lp + vcov(DriscollKraay(K; tis = :t, iis = :id))` build the estimator for each horizon from the rows that horizon uses.
+- **Tables.jl input**: `lp` and `lpiv` take any Tables.jl table. String and categorical columns enter through StatsModels contrasts. `missing` in a numeric column excludes the row only at the horizons that need it.
+- **`sample = :fixed`**: estimates every horizon on the rows available at all horizons. The default, `:varying`, keeps per-horizon samples.
+- **`horizonmodel(lp, h)`**: returns the Regress model at horizon `h` in `0:lp.horizon`. Out-of-range horizons throw an `ArgumentError`.
+- **`nobs(lp)`** and **`stderror(lp; term)`**: per-horizon observation counts and standard errors, as methods on the StatsAPI generics.
+- **`AbstractLocalProjection`**: exported supertype of `LocalProjection` and `LocalProjectionIV`.
+- **`IRFSummary` is a Tables.jl table**, with `response`, `term`, `level` and `scale` columns, so `DataFrame(summary)` works without DataFrames as a dependency.
 
 ### Changed
 
-- **Requires CovarianceMatrices 0.33, Regress 0.3, MacroEconometricTools 0.2, and Julia 1.13.** `vcov(estimator, lp)` reads the diagonal of the `CovarianceMatrix` that CovarianceMatrices returns; the results are unchanged. Julia 1.13 is the floor that Regress and MacroEconometricTools set.
+- **`lpiv` takes the IV estimator first**: `lpiv(TSLS(), formula, data; horizon)`, mirroring `Regress.iv`. `TSLS` is re-exported. Estimators without a matrix-based `Regress.iv` method are rejected before fitting.
+- **Inference uses the stored estimator**: `summarize`, `as_irf_result` and the plotting functions use the estimator set by `lp + vcov(estimator)` (HC1 by default). Passing an estimator is the same as applying it with `+ vcov(estimator)` first.
+- **One computation of IRF bands**: `summarize`, `as_irf_result` and the plots all build their numbers from one `LocalProjectionIRFResult`.
+- **Plots are drawn by MacroEconometricTools**: `irfplot`, `irfplot!` and the Plots recipe hand the IRF object to MacroEconometricTools' Makie methods and Plots recipe. `irfplot!` draws onto any `Axis`.
+- **Default shock is chosen by name**: the first endogenous variable, otherwise the first coefficient other than the intercept. Formulas without an intercept (`0 + x`) work.
+- **`weakivtest(lpiv, 0)` throws** when the response is the endogenous shock; `weakivtest(lpiv)` returns `nothing` at horizon 0.
+- **Pipe syntax `y|z`** becomes an `AnchorTerm` only inside `lp` and `lpiv`; other packages' formulas keep the StatsModels meaning of `|`.
+- **`first_stage` and `weakivtest` extend the Regress.jl functions**, and `irfplot!` is the MacroEconometricTools function.
+- **`lags()` / `LagTerm` come from Regress.jl.**
+- **Requires CovarianceMatrices 0.33.1, Regress 0.3, MacroEconometricTools 0.2, and Julia 1.13.** Julia 1.13 is the floor that Regress and MacroEconometricTools set.
 
-- **`irfplot!` now imported from MacroEconometricTools.jl**: The `irfplot!` function is no longer defined locally — it is imported from MacroEconometricTools.jl (same as `irfplot`). This avoids export collisions when both packages are loaded together. The LP Makie extension adds methods to the shared function.
+### Removed
 
-### Refactoring
-
-- **`lags()` / `LagTerm` moved to Regress.jl**: Removed the local definition (~60 lines) and now imports `lags` and `LagTerm` from Regress.jl. Both packages share the same implementation.
-
-- **`first_stage` extends `Regress.first_stage`**: Methods for `LocalProjectionIV` now extend the Regress.jl function instead of defining a separate `LocalProjections.first_stage`.
-
-- **`weakivtest` extends `Regress.weakivtest`**: Methods for `LocalProjectionIV` now extend the Regress.jl function instead of defining a separate `LocalProjections.weakivtest`.
+- `LocalProjectionCovariance`, `vcov(estimator, lp)` and `stderror(cov; term)`. `vcov` and `stderror` are the StatsAPI functions.
+- `coefnames(lp, h)`; `coefnames(lp)` covers all horizons.
+- The Makie extension, the `IRFPlot` recipe and `irfplot_axis`.
+- `irf_scale` and `flipshock` plotting keywords. Use `rescale` from MacroEconometricTools.jl before plotting.
+- Exports of `FirstStageIV`, `WeakIVTestResult` (public in Regress) and `LocalProjectionIRFResult` (public in MacroEconometricTools). `CumulTerm`, `LeadTerm` and `AnchorTerm` are `public` but no longer exported.

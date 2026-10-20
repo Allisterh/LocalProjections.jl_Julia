@@ -1,6 +1,6 @@
 name = "LocalProjections"
 uuid = "42571009-22de-48df-b2d5-611d176495e8"
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 AxisArrays = "39de3d68-74b9-583c-8d2d-e117c070f3a9"
@@ -24,7 +24,7 @@ Regress = { rev = "main", url = "https://github.com/gragusa/Regress.jl" }
 Aqua = "0.8"
 AxisArrays = "0.4"
 CairoMakie = "0.15"
-CovarianceMatrices = "0.33"
+CovarianceMatrices = "0.33.1"
 DataFrames = "1"
 Distributions = "0.25"
 ExplicitImports = "1.15"
