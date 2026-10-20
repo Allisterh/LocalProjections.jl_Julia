@@ -1053,3 +1053,49 @@ end
     @test nobs(riv) == [n - h for h in 0:H]
     @test_throws "horizon 4 is outside the estimated horizons 0:3" horizonmodel(riv, H + 1)
 end
+
+@testitem "Plotting draws the IRF object" tags = [:plots, :api] begin
+    ENV["GKSwstype"] = "nul"  # headless GR for Plots
+    using LocalProjections
+    using DataFrames, StatsModels, CovarianceMatrices, Test
+    using MacroEconometricTools: point_estimate, lowerbounds, upperbounds
+    import CairoMakie, Plots
+
+    x = sin.(0.3 .* (1:80))
+    df = DataFrame(x = x, y = 0.5 .* x .+ cos.(1:80))
+    r = lp(@formula(leads(y) ~ x), df; horizon = 4)
+    ys(pts) = [p[2] for p in pts]
+
+    # Makie, single panel: line and band are the IRF object's estimate and bounds
+    fig = CairoMakie.Figure()
+    ax = CairoMakie.Axis(fig[1, 1])
+    @test irfplot!(ax, r, HC3(); levels = [0.9]) === ax
+    irf = as_irf_result(r + vcov(HC3()); coverage = [0.9])
+    line = only(filter(p -> p isa CairoMakie.Lines, ax.scene.plots))
+    band = only(filter(p -> p isa CairoMakie.Band, ax.scene.plots))
+    @test ys(line[1][]) ≈ vec(Array(point_estimate(irf)))
+    @test ys(band[1][]) ≈ vec(Array(only(lowerbounds(irf))))
+    @test ys(band[2][]) ≈ vec(Array(only(upperbounds(irf))))
+
+    # Makie, figure: one band per level
+    fig = irfplot(r; levels = [0.68, 0.9], xtickstep = 2)
+    @test fig isa CairoMakie.Figure
+    ax = only(filter(c -> c isa CairoMakie.Axis, fig.content))
+    @test count(p -> p isa CairoMakie.Band, ax.scene.plots) == 2
+
+    # Plots: the recipe draws the same bounds and estimate
+    plt = Plots.plot(r; levels = [0.9])
+    irf = as_irf_result(r; coverage = [0.9])
+    @test any(s -> s[:y] ≈ vec(Array(point_estimate(irf))), plt.series_list)
+    @test any(
+        s -> s[:fillrange] isa AbstractVector &&
+            s[:fillrange] ≈ vec(Array(only(lowerbounds(irf)))),
+        plt.series_list
+    )
+    @test Plots.plot(r, HC3()) isa Plots.Plot
+
+    # Levels go through the same validation as summarize and as_irf_result
+    msg = "confidence levels must lie strictly between 0 and 1; got 95"
+    @test_throws msg irfplot(r; levels = [95])
+    @test_throws msg Plots.plot(r; levels = [95])
+end

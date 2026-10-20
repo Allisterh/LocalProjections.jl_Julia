@@ -5,7 +5,7 @@ export lp, lpiv, TSLS, horizonmodel, coefpath, nobs, stderror, vcov, summarize, 
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
-export irfplot, irfplot!, irfplot_axis
+export irfplot, irfplot!
 
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, @crayon_str
@@ -18,12 +18,12 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
 using CovarianceMatrices: CovarianceMatrices
 using Statistics: quantile
 using Distributions: Normal
-using RecipesBase: RecipesBase, @recipe, @series
+using RecipesBase: RecipesBase, @recipe
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
 using AxisArrays: AxisArrays, AxisArray, Axis
-using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!, point_estimate,
-    lowerbounds, upperbounds, coverages
+using MacroEconometricTools: MacroEconometricTools, LocalProjectionIRFResult, irfplot, irfplot!,
+    point_estimate, lowerbounds, upperbounds, coverages
 
 # ============================================================================
 # Helper Functions for Common Patterns
@@ -1479,95 +1479,67 @@ function summarize(
 end
 
 # ============================================================================
-# Makie Extension Stubs
+# Plotting
 # ============================================================================
 
-"""
-    irfplot(lp; term=lp.shock, levels=[0.95])
-    irfplot(lp, estimator; term=lp.shock, levels=[0.95])
-
-Plot impulse response function from a local projection. Requires Makie.
-
-Creates a line plot with confidence bands.
-
-# Arguments
-- `lp::Union{LocalProjection, LocalProjectionIV}`: estimated local projection
-- `estimator`: a `CovarianceMatrices` estimator; defaults to the one stored in `lp`
-- `term::Symbol`: which coefficient to plot (default: shock variable)
-- `levels::Vector{Float64}`: confidence levels for bands (default: `[0.95]`)
-"""
-# irfplot and irfplot! are imported from MacroEconometricTools (hub) — methods added by Makie extension
+# Every plotting path draws the IRF object built by `_irf_result`, using
+# MacroEconometricTools' Makie methods and Plots recipe for that object.
 
 """
-    irfplot_axis(subfig, lp[, estimator]; kwargs...)
+    irfplot(lp; term = lp.shock, levels = [0.95], kwargs...) -> Makie.Figure
+    irfplot(lp, estimator; term = lp.shock, levels = [0.95], kwargs...)
 
-Create an `Axis` with an IRF plot in the given sub-figure position. Requires Makie.
+Plot the impulse response of `lp.response` to `term`, with a confidence band for each
+of `levels`. Requires a Makie backend (e.g. `CairoMakie`).
 
-Returns `(subfig, ax, plot)`.
+Bands use the estimator stored in `lp`; passing `estimator` plots
+`lp + vcov(estimator)`. They are the bands of [`as_irf_result`](@ref) with
+`coverage = levels`. The figure is drawn by MacroEconometricTools' `irfplot` for that
+object, which receives the remaining keywords (`bandcolor`, `bandalpha`, `linecolor`,
+`linewidth`, `drawzero`, `xtickstep`, `title`, `size`, ...).
+
+With Plots.jl, `plot(lp; term, levels)` and `plot(lp, estimator; term, levels)` draw
+the same object with MacroEconometricTools' Plots recipe.
 """
-function irfplot_axis end
-
-# ============================================================================
-# Plot Recipes using RecipesBase
-# ============================================================================
-
-"""
-    IRFPlot
-
-Internal wrapper type for dispatching plot recipes on LocalProjection/LocalProjectionIV.
-Users should call `plot(lp; ...)` or `plot(lp, estimator; ...)` directly.
-"""
-struct IRFPlot{L <: AbstractLocalProjection}
-    lp::L
-    term::Symbol
-    levels::Vector{Float64}
+function MacroEconometricTools.irfplot(
+        lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+    )
+    return irfplot(_irf_result(lp, term, levels; diagnostics = false); kwargs...)
 end
 
-@recipe function f(wrapper::IRFPlot)
-    lp = wrapper.lp
-    term = wrapper.term
-    levels = wrapper.levels
+function MacroEconometricTools.irfplot(
+        lp::AbstractLocalProjection,
+        estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
+        kwargs...
+    )
+    return irfplot(lp + vcov(estimator); kwargs...)
+end
 
-    beta = coefpath(lp; term = term)
-    se = stderror(lp; term = term)
-    horizons = collect(0:lp.horizon)
+"""
+    irfplot!(ax, lp; term = lp.shock, levels = [0.95], kwargs...) -> ax
+    irfplot!(ax, lp, estimator; term = lp.shock, levels = [0.95], kwargs...)
 
-    sorted_levels = sort(levels; rev = true)
-    for level in sorted_levels
-        (level <= 0 || level >= 1) && throw(ArgumentError("levels must be in (0, 1)"))
-    end
+Draw the impulse response of `lp.response` to `term` onto the Makie `Axis` `ax`.
+Bands and keywords are as in [`irfplot`](@ref); MacroEconometricTools' `irfplot!`
+draws the panel.
+"""
+function MacroEconometricTools.irfplot!(
+        ax, lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+    )
+    irf = _irf_result(lp, term, levels; diagnostics = false)
+    return irfplot!(ax, irf; var = lp.response, shock = term, kwargs...)
+end
 
-    z_max = quantile(Normal(), 0.5 + sorted_levels[1] / 2)
-    ribbon_max = z_max .* se
-
-    xlabel --> "Horizon"
-    ylabel --> String(term)
-    label --> "IRF"
-    linewidth --> 2
-    fillalpha --> 0.3
-    legend --> :best
-
-    if length(sorted_levels) > 1
-        for (idx, level) in enumerate(sorted_levels[2:end])
-            @series begin
-                z = quantile(Normal(), 0.5 + level / 2)
-                band = z .* se
-                ribbon := band
-                fillalpha := 0.3 + 0.15 * idx
-                label := ""
-                linewidth := 0
-                linecolor := :transparent
-                horizons, beta
-            end
-        end
-    end
-
-    ribbon --> ribbon_max
-    return horizons, beta
+function MacroEconometricTools.irfplot!(
+        ax, lp::AbstractLocalProjection,
+        estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
+        kwargs...
+    )
+    return irfplot!(ax, lp + vcov(estimator); kwargs...)
 end
 
 @recipe function f(lp::AbstractLocalProjection; term = lp.shock, levels = [0.95])
-    IRFPlot(lp, term, Float64.(levels))
+    return _irf_result(lp, term, levels; diagnostics = false)
 end
 
 @recipe function f(
@@ -1575,7 +1547,7 @@ end
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term = lp.shock, levels = [0.95]
     )
-    IRFPlot(lp + vcov(estimator), term, Float64.(levels))
+    return _irf_result(lp + vcov(estimator), term, levels; diagnostics = false)
 end
 
 # ============================================================================
