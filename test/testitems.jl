@@ -773,6 +773,40 @@ end
     @test fs.F_nonrobust ≈ Regress.first_stage(refiv).F_nonrobust
 end
 
+@testitem "Per-horizon models carry coefficient names" tags = [:core, :lpiv, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: HC3
+    using StatsAPI: coeftable
+    using StableRNGs
+
+    rng = StableRNG(11)
+    n, H = 200, 3
+    z = randn(rng, n)
+    x = 0.6 .* z .+ randn(rng, n)
+    w = randn(rng, n)
+    y = 0.5 .* x .+ 0.2 .* w .+ randn(rng, n)
+    df = DataFrame(; y, x, z, w)
+
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = H)
+    @test coefnames(r) == ["(Intercept)", "x", "w"]
+    for h in 0:H
+        @test coefnames(horizonmodel(r, h)) == coefnames(r)
+    end
+    rh = r + vcov(HC3())
+    @test coefnames(horizonmodel(rh, H)) == coefnames(r)
+    @test coeftable(horizonmodel(r, 1)).rownms == ["x", "w", "(Intercept)"]
+    @test occursin("w", sprint(show, coeftable(horizonmodel(r, 1))))
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = H)
+    @test coefnames(horizonmodel(riv, 2)) == coefnames(riv) == ["(Intercept)", "w", "x"]
+    @test coeftable(horizonmodel(riv, 2)).rownms == ["w", "x", "(Intercept)"]
+    fs = first_stage(riv, 2)
+    @test fs.endogenous_names == ["x"]
+    @test fs.instrument_names == ["z"]
+    @test coefnames(only(fs.models)) == ["(Intercept)", "w", "z"]
+end
+
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
     using Regress: WeakIVTestResult

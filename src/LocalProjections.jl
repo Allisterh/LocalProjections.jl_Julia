@@ -490,8 +490,8 @@ abstract type AbstractLocalProjection end
 
 Return the fitted Regress.jl model for horizon `h`, where `0 ≤ h ≤ lp.horizon`.
 
-The model supports the StatsAPI accessors (`coef`, `vcov`, `stderror`, `nobs`, ...).
-Its coefficients are ordered as in `coefnames(lp)`. When the response is the shock,
+The model supports the StatsAPI accessors (`coef`, `coefnames`, `coeftable`, `vcov`,
+`stderror`, `nobs`, ...), and `coefnames(horizonmodel(lp, h)) == coefnames(lp)`. When the response is the shock,
 the model at `h = 0` regresses the shock on itself; [`coefpath`](@ref) reports the
 exact values (1 for the shock, 0 for other terms) at that horizon instead.
 
@@ -501,7 +501,8 @@ Throws an `ArgumentError` when `h` is outside `0:lp.horizon`.
 ```julia
 r = lp(@formula(leads(y) ~ x), df; horizon = 8)
 m = horizonmodel(r, 4)
-coef(m)[findfirst(==("x"), coefnames(r))]
+coeftable(m)
+coef(m)[findfirst(==("x"), coefnames(m))]
 ```
 """
 function horizonmodel(lp::AbstractLocalProjection, h::Integer)
@@ -1146,20 +1147,21 @@ function _lp_design(
 end
 
 # Regress uses `has_intercept` for the TSS behind R², the model F-test DOF and the
-# first-stage regressions of `first_stage`/`weakivtest`.
-function _fit_horizon(::Nothing, X, Z, y, n_endogenous, has_intercept)
-    return ols(X, y; has_intercept)
+# first-stage regressions of `first_stage`/`weakivtest`. `coefnames` names the columns of
+# `X`, so `coefnames(horizonmodel(lp, h)) == coefnames(lp)`.
+function _fit_horizon(::Nothing, X, Z, y, n_endogenous, has_intercept, coefnames)
+    return ols(X, y; has_intercept, coefnames)
 end
-function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept)
+function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept, coefnames)
     return iv(
         estimator, collect(Z), collect(X), collect(y);
-        has_intercept, n_endogenous
+        has_intercept, n_endogenous, coefnames
     )
 end
 
 """
-    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, lhs, data, groups,
-        horizon, sample)
+    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, coef_names, lhs,
+        data, groups, horizon, sample)
 
 Fit one model per horizon `0:horizon` and return the models with the row mask of each
 horizon: OLS when `estimator === nothing`, otherwise
@@ -1167,14 +1169,15 @@ horizon: OLS when `estimator === nothing`, otherwise
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
 The response is computed within each block of rows in `groups`. `has_intercept` tells
-Regress whether `X` contains an intercept column.
+Regress whether `X` contains an intercept column; `coef_names` names the columns of `X`.
 
 `X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
 abstract return types of StatsModels.
 """
 function _lp_estimate_horizons(
         estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
-        has_intercept::Bool, lhs, data, groups, horizon::Integer, sample::Symbol
+        has_intercept::Bool, coef_names::Vector{String}, lhs, data, groups,
+        horizon::Integer, sample::Symbol
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
@@ -1200,7 +1203,7 @@ function _lp_estimate_horizons(
             throw(ArgumentError("No complete observations available for horizon $h"))
         return _fit_horizon(
             estimator, view(X, r, :), view(Z, r, :), view(y_h, r), n_endogenous,
-            has_intercept
+            has_intercept, coef_names
         )
     end
 
@@ -1271,7 +1274,8 @@ function lp(
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time)
     models, rows = _lp_estimate_horizons(
-        nothing, d.X, d.Z, 0, d.has_intercept, d.lhs, d.data, d.groups, horizon, sample
+        nothing, d.X, d.Z, 0, d.has_intercept, d.coef_names, d.lhs, d.data, d.groups,
+        horizon, sample
     )
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
@@ -1498,8 +1502,8 @@ function lpiv(
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models, rows = _lp_estimate_horizons(
-        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.lhs, d.data,
-        d.groups, horizon, sample
+        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.coef_names, d.lhs,
+        d.data, d.groups, horizon, sample
     )
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
@@ -1524,22 +1528,22 @@ end
 """
     first_stage(lpiv::LocalProjectionIV, h::Int) -> Regress.FirstStageIV
 
-Return first-stage regressions and diagnostics for horizon `h` (0-indexed).
+Return first-stage regressions and diagnostics for horizon `h` (0-indexed). The
+first-stage models are named by the exogenous regressors and the instruments of the
+formula.
 
 # Example
 ```julia
 result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2)), df; horizon=10)
 fs = first_stage(result, 0)
-coef(fs.models[1])    # first-stage coefficients
+coeftable(fs.models[1])  # first-stage coefficients, named
 fs.F_nonrobust        # non-robust F
 fs.F_robust           # robust F using the model's current vcov
 ```
 """
 function Regress.first_stage(lpiv::LocalProjectionIV, h::Int)
     return Regress.first_stage(
-        horizonmodel(lpiv, h);
-        endogenous_names = lpiv.endogenous_names,
-        instrument_names = lpiv.instrument_names
+        horizonmodel(lpiv, h); instrument_names = lpiv.instrument_names
     )
 end
 

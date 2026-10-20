@@ -10,7 +10,7 @@ This release breaks the 0.1 API. No deprecation shims are provided.
 - **Clustered and Driscoll-Kraay inference by column name**: `lp + vcov(CR1(:id))` and `lp + vcov(DriscollKraay(K; tis = :t, iis = :id))` build the estimator for each horizon from the rows that horizon uses.
 - **Tables.jl input**: `lp` and `lpiv` take any Tables.jl table. String and categorical columns enter through StatsModels contrasts. `missing` in a numeric column excludes the row only at the horizons that need it.
 - **`sample = :fixed`**: estimates every horizon on the rows available at all horizons. The default, `:varying`, keeps per-horizon samples.
-- **`horizonmodel(lp, h)`**: returns the Regress model at horizon `h` in `0:lp.horizon`. Out-of-range horizons throw an `ArgumentError`.
+- **`horizonmodel(lp, h)`**: returns the Regress model at horizon `h` in `0:lp.horizon`. Out-of-range horizons throw an `ArgumentError`. The model carries the formula's coefficient names, so `coefnames(horizonmodel(lp, h)) == coefnames(lp)` and `coeftable` prints them; first-stage models from `first_stage(lpiv, h)` are named by the exogenous regressors and instruments.
 - **`nobs(lp)`** and **`stderror(lp; term)`**: per-horizon observation counts and standard errors, as methods on the StatsAPI generics.
 - **`AbstractLocalProjection`**: exported supertype of `LocalProjection` and `LocalProjectionIV`.
 - **`IRFSummary` is a Tables.jl table**, with `response`, `term`, `level` and `scale` columns, so `DataFrame(summary)` works without DataFrames as a dependency.
