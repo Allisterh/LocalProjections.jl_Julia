@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Added
-
-- **Absorbed fixed effects**: `fe(column)` terms in `lp` and `lpiv` formulas, e.g. `leads(y) ~ x + fe(id) + fe(t)`, are absorbed by Regress at each horizon on that horizon's rows. The model has no intercept, and the absorbed levels enter the degrees of freedom and the clustered small-sample factor (a fixed effect nested in the cluster counts once). `fe` is exported. Fixed effects interacted with other terms or placed inside `(endogenous ~ instruments)` are errors.
-
 ## 0.2.0
 
 This release breaks the 0.1 API. No deprecation shims are provided.
@@ -14,6 +8,7 @@ This release breaks the 0.1 API. No deprecation shims are provided.
 
 - **Panel local projections**: `lp` and `lpiv` accept `unit` and `time` column names. Rows are sorted by unit and time, and leads, cumulative sums, anchors and lags are built within each unit. Repeated (unit, time) pairs, a unit that skips a period present elsewhere in the data, missing or NaN identifiers, and `unit` without `time` are errors. Panel results default to `CR1(unit)` standard errors.
 - **Clustered and Driscoll-Kraay inference by column name**: `lp + vcov(CR1(:id))` and `lp + vcov(DriscollKraay(K; tis = :t, iis = :id))` build the estimator for each horizon from the rows that horizon uses.
+- **Absorbed fixed effects**: `fe(column)` terms in `lp` and `lpiv` formulas, e.g. `leads(y) ~ x + fe(id) + fe(t)`, are absorbed by Regress at each horizon on that horizon's rows. The model has no intercept, and the absorbed levels enter the degrees of freedom and the clustered small-sample factor (a fixed effect nested in the cluster counts once). `fe` is exported. Fixed effects interacted with other terms or placed inside `(endogenous ~ instruments)` are errors.
 - **Tables.jl input**: `lp` and `lpiv` take any Tables.jl table. String and categorical columns enter through StatsModels contrasts. `missing` in a numeric column excludes the row only at the horizons that need it.
 - **`sample = :fixed`**: estimates every horizon on the rows available at all horizons. The default, `:varying`, keeps per-horizon samples.
 - **`horizonmodel(lp, h)`**: returns the Regress model at horizon `h` in `0:lp.horizon`. Out-of-range horizons throw an `ArgumentError`. The model carries the formula's coefficient names, so `coefnames(horizonmodel(lp, h)) == coefnames(lp)` and `coeftable` prints them; first-stage models from `first_stage(lpiv, h)` are named by the exogenous regressors and instruments.
