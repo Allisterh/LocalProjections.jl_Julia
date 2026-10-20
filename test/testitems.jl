@@ -734,6 +734,42 @@ end
     @test lpiv_coef ≈ beta_2sls[2] atol = 1.0e-8
 end
 
+@testitem "Intercept flag matches Regress formula fits" tags = [:core, :lpiv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using StatsAPI: adjr2, r2, rss
+    using StableRNGs
+    import Regress
+
+    rng = StableRNG(7)
+    n, h = 300, 2
+    z = randn(rng, n)
+    x = 0.6 .* z .+ randn(rng, n)
+    w = randn(rng, n)
+    y = 3.0 .+ 0.5 .* x .+ 0.2 .* w .+ randn(rng, n)
+    df = DataFrame(; y, x, z, w)
+    # Row t of `fit` holds y[t + h], as `leads(y)` does at horizon h.
+    fit = DataFrame(; yh = [y[(1 + h):end]; fill(missing, h)], x, z, w)
+
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = h)
+    ref = Regress.ols(fit, @formula(yh ~ x + w))
+    @test r2(horizonmodel(r, h)) ≈ r2(ref)
+    @test adjr2(horizonmodel(r, h)) ≈ adjr2(ref)
+
+    # Without an intercept, R² is uncentered, as in the formula fit.
+    r0 = lp(@formula(leads(y) ~ 0 + x + w), df; horizon = h)
+    ref0 = Regress.ols(fit, @formula(yh ~ 0 + x + w))
+    @test r2(horizonmodel(r0, h)) ≈ r2(ref0)
+    @test r2(horizonmodel(r0, h)) ≈ 1 - rss(ref0) / sum(abs2, y[(1 + h):end])
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = h)
+    refiv = Regress.iv(TSLS(), fit, @formula(yh ~ (x ~ z) + w))
+    @test r2(horizonmodel(riv, h)) ≈ r2(refiv)
+    fs = first_stage(riv, h)
+    @test r2(only(fs.models)) ≈ r2(Regress.ols(fit[1:(n - h), :], @formula(x ~ z + w)))
+    @test fs.F_nonrobust ≈ Regress.first_stage(refiv).F_nonrobust
+end
+
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
     using Regress: WeakIVTestResult

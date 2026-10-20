@@ -23,6 +23,7 @@ This release breaks the 0.1 API. No deprecation shims are provided.
 - **Plots are drawn by MacroEconometricTools**: `irfplot`, `irfplot!` and the Plots recipe hand the IRF object to MacroEconometricTools' Makie methods and Plots recipe. `irfplot!` draws onto any `Axis`.
 - **Default shock is chosen by name**: the first endogenous variable, otherwise the first coefficient other than the intercept. Formulas without an intercept (`0 + x`) work.
 - **`weakivtest(lpiv, 0)` throws** when the response is the endogenous shock; `weakivtest(lpiv)` returns `nothing` at horizon 0.
+- **Per-horizon R² is centered when the formula has an intercept**: each horizon model, and each first-stage regression behind `first_stage`, is fitted with Regress's `has_intercept` set from the formula, so `r2` and `adjr2` equal those of the Regress formula fit. Formulas without an intercept keep the uncentered R². Coefficients, standard errors and first-stage F statistics are unchanged.
 - **Pipe syntax `y|z`** becomes an `AnchorTerm` only inside `lp` and `lpiv`; other packages' formulas keep the StatsModels meaning of `|`.
 - **`first_stage` and `weakivtest` extend the Regress.jl functions**, and `irfplot!` is the MacroEconometricTools function.
 - **`lags()` / `LagTerm` come from Regress.jl.**

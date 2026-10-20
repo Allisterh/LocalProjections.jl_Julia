@@ -1063,7 +1063,7 @@ required (`lpiv`) or forbidden (`lp`). `unit` and `time` name the panel columns,
 Returns a `NamedTuple` with the regressor matrix `X = [exogenous endogenous]`, the
 instrument matrix `Z = [exogenous instruments]` (equal to `X` without instruments),
 coefficient, endogenous and instrument names, the response name, the unwrapped LHS,
-the data as a `Tables.ColumnTable` in time order, the row range of each unit, and the
+whether the coefficients include `(Intercept)`, the data as a `Tables.ColumnTable` in time order, the row range of each unit, and the
 validated shock.
 
 Rows are never dropped here: leads must be computed on the full table. `missing` in
@@ -1139,35 +1139,42 @@ function _lp_design(
         X = hcat(X_exo, X_endo)::Matrix{Float64},
         Z = hcat(X_exo, Z_instr)::Matrix{Float64},
         coef_names, endo_names, instr_names, response, lhs,
+        has_intercept = "(Intercept)" in coef_names,
         data = tbl, groups,
         shock = _select_shock(shock, coef_names, endo_names),
     )
 end
 
-_fit_horizon(::Nothing, X, Z, y, n_endogenous) = ols(X, y; has_intercept = false)
-function _fit_horizon(estimator, X, Z, y, n_endogenous)
+# Regress uses `has_intercept` for the TSS behind R², the model F-test DOF and the
+# first-stage regressions of `first_stage`/`weakivtest`.
+function _fit_horizon(::Nothing, X, Z, y, n_endogenous, has_intercept)
+    return ols(X, y; has_intercept)
+end
+function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept)
     return iv(
         estimator, collect(Z), collect(X), collect(y);
-        has_intercept = false, n_endogenous
+        has_intercept, n_endogenous
     )
 end
 
 """
-    _lp_estimate_horizons(estimator, X, Z, n_endogenous, lhs, data, groups, horizon, sample)
+    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, lhs, data, groups,
+        horizon, sample)
 
 Fit one model per horizon `0:horizon` and return the models with the row mask of each
 horizon: OLS when `estimator === nothing`, otherwise
 `Regress.iv(estimator, ...)`. With `sample = :varying`, each horizon uses the rows where
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
-The response is computed within each block of rows in `groups`.
+The response is computed within each block of rows in `groups`. `has_intercept` tells
+Regress whether `X` contains an intercept column.
 
 `X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
 abstract return types of StatsModels.
 """
 function _lp_estimate_horizons(
         estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
-        lhs, data, groups, horizon::Integer, sample::Symbol
+        has_intercept::Bool, lhs, data, groups, horizon::Integer, sample::Symbol
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
@@ -1192,7 +1199,8 @@ function _lp_estimate_horizons(
         any(r) ||
             throw(ArgumentError("No complete observations available for horizon $h"))
         return _fit_horizon(
-            estimator, view(X, r, :), view(Z, r, :), view(y_h, r), n_endogenous
+            estimator, view(X, r, :), view(Z, r, :), view(y_h, r), n_endogenous,
+            has_intercept
         )
     end
 
@@ -1263,7 +1271,7 @@ function lp(
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time)
     models, rows = _lp_estimate_horizons(
-        nothing, d.X, d.Z, 0, d.lhs, d.data, d.groups, horizon, sample
+        nothing, d.X, d.Z, 0, d.has_intercept, d.lhs, d.data, d.groups, horizon, sample
     )
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
@@ -1490,7 +1498,8 @@ function lpiv(
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models, rows = _lp_estimate_horizons(
-        estimator, d.X, d.Z, length(d.endo_names), d.lhs, d.data, d.groups, horizon, sample
+        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.lhs, d.data,
+        d.groups, horizon, sample
     )
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
