@@ -1173,7 +1173,7 @@ end
 
 @testitem "Panel clustered inference" tags = [:panel, :vcov, :lpiv, :api] begin
     using DataFrames, StatsBase, StatsModels, Test
-    using CovarianceMatrices: HC1, CR0, CR1, CR2, Bartlett, DriscollKraay, Clustering
+    using CovarianceMatrices: CovarianceMatrices, HC1, CR0, CR1, CR2, Bartlett, DriscollKraay, Clustering
     using StableRNGs
 
     rng = StableRNG(20261023)
@@ -1219,7 +1219,7 @@ end
         rdk = r + vcov(dk)
         @test occursin("Vcov:       $(repr(dk))", sprint(show, MIME"text/plain"(), rdk))
         @test stderror(rdk) ≈ [
-            manual_se(r, DriscollKraay(Bartlett(2), used(h).t, used(h).id; correction = dk.correction), h)
+            manual_se(r, DriscollKraay(Bartlett(2), used(h).t, used(h).id; correction = CovarianceMatrices.correction(dk)), h)
                 for h in 0:H
         ]
     end

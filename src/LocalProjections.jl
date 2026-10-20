@@ -683,7 +683,7 @@ function _horizon_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, h:
     codes .-= minimum(codes) - 1
     return DriscollKraay(
         timekernel(estimator), Clustering(codes, maximum(codes)), u;
-        correction = estimator.correction
+        correction = CovarianceMatrices.correction(estimator)
     )
 end
 
