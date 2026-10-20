@@ -1,7 +1,7 @@
 module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
-export lp, lpiv, TSLS, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
+export lp, lpiv, TSLS, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export lag, lead, cumul, lags, leads, anchor
 export as_irf_result
 export irfplot, irfplot!
@@ -14,7 +14,7 @@ using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, term
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
     AbstractIVEstimator,
-    VcovSpec, lags, first_stage, weakivtest
+    VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
     DriscollKraay, clusters, timekernel, timeindex, unitindex
 using Statistics: quantile
@@ -852,6 +852,29 @@ function _split_rhs(rhs)
     return exo, ivs
 end
 
+_is_fe(t) = t isa FunctionTerm{typeof(fe)}
+_has_fe(t) = _is_fe(t)
+_has_fe(t::StatsModels.InteractionTerm) = any(_has_fe, t.terms)
+_has_fe(t::FormulaTerm) = any(_has_fe, _split_rhs(t.lhs)[1]) || any(_has_fe, _split_rhs(t.rhs)[1])
+
+"""
+    _fe_columns(exo, ivs) -> Vector{Symbol}
+
+Columns named by the `fe(column)` terms among the exogenous terms `exo`. Fixed effects
+interacted with other terms, or inside `(endogenous ~ instruments)` terms, are errors.
+"""
+function _fe_columns(exo, ivs)
+    for t in Iterators.flatten((exo, ivs))
+        !_is_fe(t) && _has_fe(t) && throw(
+            ArgumentError(
+                "fixed effects must appear as separate `fe(column)` terms among the " *
+                    "exogenous regressors (got `$t`)"
+            )
+        )
+    end
+    return Symbol[Symbol(only(t.args)) for t in exo if _is_fe(t)]
+end
+
 """
     _extract_all_vars_from_formula(formula::FormulaTerm) -> Vector{Symbol}
 
@@ -1064,8 +1087,10 @@ required (`lpiv`) or forbidden (`lp`). `unit` and `time` name the panel columns,
 Returns a `NamedTuple` with the regressor matrix `X = [exogenous endogenous]`, the
 instrument matrix `Z = [exogenous instruments]` (equal to `X` without instruments),
 coefficient, endogenous and instrument names, the response name, the unwrapped LHS,
-whether the coefficients include `(Intercept)`, the data as a `Tables.ColumnTable` in time order, the row range of each unit, and the
-validated shock.
+whether the coefficients include `(Intercept)`, the columns named by `fe(column)` terms
+(time-ordered, one vector per fixed effect), the data as a `Tables.ColumnTable` in time
+order, the row range of each unit, and the validated shock. With fixed effects the
+intercept is dropped: the fixed effects absorb it.
 
 Rows are never dropped here: leads must be computed on the full table. `missing` in
 numeric columns becomes `NaN` and is excluded per horizon by
@@ -1086,6 +1111,19 @@ function _lp_design(
     tbl = _missing_to_nan(tbl, all_vars)
 
     exo_raw, iv_raw = _split_rhs(formula.rhs)
+    fe_names = _fe_columns(exo_raw, iv_raw)
+    for name in fe_names
+        haskey(tbl, name) ||
+            throw(ArgumentError("fixed effect column `$name` is not in the data"))
+        any(_isunavailable, tbl[name]) && throw(
+            ArgumentError("fixed effect column `$name` contains missing or NaN values")
+        )
+    end
+    if !isempty(fe_names)
+        # The fixed effects absorb the intercept
+        filter!(t -> !_is_fe(t) && !(t isa ConstantTerm), exo_raw)
+        pushfirst!(exo_raw, ConstantTerm(0))
+    end
     if instrumented
         isempty(iv_raw) && throw(
             ArgumentError(
@@ -1136,11 +1174,15 @@ function _lp_design(
     )
 
     coef_names = vcat(exo_names, endo_names)
+    isempty(coef_names) && throw(
+        ArgumentError("formula must contain at least one regressor besides fixed effects")
+    )
     return (;
         X = hcat(X_exo, X_endo)::Matrix{Float64},
         Z = hcat(X_exo, Z_instr)::Matrix{Float64},
         coef_names, endo_names, instr_names, response, lhs,
         has_intercept = "(Intercept)" in coef_names,
+        fe = [tbl[name] for name in fe_names],
         data = tbl, groups,
         shock = _select_shock(shock, coef_names, endo_names),
     )
@@ -1148,20 +1190,21 @@ end
 
 # Regress uses `has_intercept` for the TSS behind R², the model F-test DOF and the
 # first-stage regressions of `first_stage`/`weakivtest`. `coefnames` names the columns of
-# `X`, so `coefnames(horizonmodel(lp, h)) == coefnames(lp)`.
-function _fit_horizon(::Nothing, X, Z, y, n_endogenous, has_intercept, coefnames)
-    return ols(X, y; has_intercept, coefnames)
+# `X`, so `coefnames(horizonmodel(lp, h)) == coefnames(lp)`. `fe` is `nothing` or a tuple
+# of group vectors aligned with the rows of `X`.
+function _fit_horizon(::Nothing, X, Z, y, n_endogenous, has_intercept, coefnames, fe)
+    return ols(X, y; has_intercept, coefnames, fe)
 end
-function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept, coefnames)
+function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept, coefnames, fe)
     return iv(
         estimator, collect(Z), collect(X), collect(y);
-        has_intercept, n_endogenous, coefnames
+        has_intercept, n_endogenous, coefnames, fe
     )
 end
 
 """
-    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, coef_names, lhs,
-        data, groups, horizon, sample)
+    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, coef_names, fe,
+        lhs, data, groups, horizon, sample)
 
 Fit one model per horizon `0:horizon` and return the models with the row mask of each
 horizon: OLS when `estimator === nothing`, otherwise
@@ -1170,14 +1213,16 @@ horizon: OLS when `estimator === nothing`, otherwise
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
 The response is computed within each block of rows in `groups`. `has_intercept` tells
 Regress whether `X` contains an intercept column; `coef_names` names the columns of `X`.
+`fe` holds one group vector per absorbed fixed effect, aligned with the rows of `X`; each
+horizon absorbs them on its own rows.
 
 `X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
 abstract return types of StatsModels.
 """
 function _lp_estimate_horizons(
         estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
-        has_intercept::Bool, coef_names::Vector{String}, lhs, data, groups,
-        horizon::Integer, sample::Symbol
+        has_intercept::Bool, coef_names::Vector{String}, fe::AbstractVector, lhs, data,
+        groups, horizon::Integer, sample::Symbol
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
@@ -1201,9 +1246,10 @@ function _lp_estimate_horizons(
         r, y_h = rows[h + 1], ys[h + 1]
         any(r) ||
             throw(ArgumentError("No complete observations available for horizon $h"))
+        fe_h = isempty(fe) ? nothing : Tuple(g[r] for g in fe)
         return _fit_horizon(
             estimator, view(X, r, :), view(Z, r, :), view(y_h, r), n_endogenous,
-            has_intercept, coef_names
+            has_intercept, coef_names, fe_h
         )
     end
 
@@ -1234,9 +1280,16 @@ within each unit, so no value is shifted from one unit into another. The time va
 found anywhere in the data form the time grid; a unit that skips a period of that grid
 between its first and last observation is an error (add a row with missing values for
 the period instead). Units may start and end at different times. A single series has no
-other units to reveal a skipped period, so its rows are taken as consecutive. Unit fixed effects
-enter as a categorical control, e.g. `leads(y) ~ x + id` with `id` a string or
-`CategoricalArray` column.
+other units to reveal a skipped period, so its rows are taken as consecutive.
+
+Fixed effects are absorbed with `fe(column)` terms, e.g. `leads(y) ~ x + fe(id)` or
+`leads(y) ~ x + fe(id) + fe(t)`: each horizon demeans the response and the regressors on
+the groups among its own rows, the model has no intercept, and the absorbed levels enter
+the degrees of freedom and the small-sample factor of clustered standard errors (a fixed
+effect nested in the cluster counts once). Singleton groups are kept. A fixed-effect
+column must not contain `missing` or `NaN`. Alternatively, a categorical control
+(`leads(y) ~ x + id` with `id` a string or `CategoricalArray` column) estimates one
+dummy per unit; the shock coefficient is the same.
 
 The response must be written with `leads(y)`, `cumul(y)`, `anchor(y, z)` or the pipe
 syntax `y|z`. `shock` names the coefficient whose path is reported by
@@ -1274,8 +1327,8 @@ function lp(
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time)
     models, rows = _lp_estimate_horizons(
-        nothing, d.X, d.Z, 0, d.has_intercept, d.coef_names, d.lhs, d.data, d.groups,
-        horizon, sample
+        nothing, d.X, d.Z, 0, d.has_intercept, d.coef_names, d.fe, d.lhs, d.data,
+        d.groups, horizon, sample
     )
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
@@ -1446,6 +1499,9 @@ Where:
 - `(x ~ z1)` - x is endogenous, instrumented by z1
 - `lags(r, 5)` and `w` - exogenous controls
 
+`fe(column)` terms among the exogenous regressors absorb fixed effects, as in [`lp`](@ref),
+e.g. `leads(y) ~ (x ~ z) + fe(id)`.
+
 # Arguments
 - `estimator`: a Regress.jl IV estimator with a matrix-based `Regress.iv` method (`TSLS()`)
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
@@ -1502,8 +1558,8 @@ function lpiv(
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models, rows = _lp_estimate_horizons(
-        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.coef_names, d.lhs,
-        d.data, d.groups, horizon, sample
+        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.coef_names, d.fe,
+        d.lhs, d.data, d.groups, horizon, sample
     )
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,

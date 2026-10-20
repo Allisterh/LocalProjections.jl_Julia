@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Absorbed fixed effects**: `fe(column)` terms in `lp` and `lpiv` formulas, e.g. `leads(y) ~ x + fe(id) + fe(t)`, are absorbed by Regress at each horizon on that horizon's rows. The model has no intercept, and the absorbed levels enter the degrees of freedom and the clustered small-sample factor (a fixed effect nested in the cluster counts once). `fe` is exported. Fixed effects interacted with other terms or placed inside `(endogenous ~ instruments)` are errors.
+
 ## 0.2.0
 
 This release breaks the 0.1 API. No deprecation shims are provided.

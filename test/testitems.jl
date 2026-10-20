@@ -1296,6 +1296,77 @@ end
         vcov(CR1(:grp))
 end
 
+@testitem "Absorbed fixed effects" tags = [:panel, :vcov, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using CovarianceMatrices: HC1, CR1
+    using Regress: Regress
+    using StableRNGs
+
+    rng = StableRNG(20261020)
+    N, T = 12, 15
+    df = DataFrame(id = repeat(1:N, inner = T), t = repeat(1:T, N))
+    a = randn(rng, N)
+    df.x = randn(rng, N * T) .+ a[df.id]
+    df.z = df.x .+ randn(rng, N * T)
+    df.w = randn(rng, N * T)
+    df.y = 0.5 .* df.x .+ 0.3 .* df.w .+ 2 .* a[df.id] .+ randn(rng, N * T)
+    df.sid = string.(df.id)
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
+
+    # Response at t + h within each unit; rows without it are dropped
+    function at_horizon(h)
+        d = copy(df)
+        d.yh = [i + h <= nrow(d) && d.id[i + h] == d.id[i] ? d.y[i + h] : missing for i in 1:nrow(d)]
+        return dropmissing(d, :yh)
+    end
+
+    r = lp(@formula(leads(y) ~ x + w + fe(id)), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefnames(r) == ["x", "w"]
+    @test all(h -> coefnames(horizonmodel(r, h)) == ["x", "w"], 0:H)
+    # Absorbing the unit effects gives the coefficients of unit dummies
+    rd = lp(@formula(leads(y) ~ x + w + sid), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefpath(r) ≈ coefpath(rd)
+    @test coefpath(r; term = :w) ≈ coefpath(rd; term = :w)
+
+    for h in 0:H
+        d = at_horizon(h)
+        fm = Regress.ols(d, @formula(yh ~ x + w + fe(id)); drop_singletons = false)
+        @test coef(horizonmodel(r, h)) ≈ coef(fm)
+        # Unit FE nested in unit clusters count once in the small-sample factor
+        @test stderror(horizonmodel(r, h)) ≈ stderror(fm + vcov(CR1(:id)))
+        @test stderror(horizonmodel(r + vcov(HC1()), h)) ≈ stderror(fm + vcov(HC1()))
+        @test nobs(horizonmodel(r, h)) == nobs(fm)
+    end
+
+    r2 = lp(@formula(leads(y) ~ x + w + fe(id) + fe(t)), df; horizon = H, unit = :id, time = :t)
+    f2 = Regress.ols(at_horizon(2), @formula(yh ~ x + w + fe(id) + fe(t)); drop_singletons = false)
+    @test coef(horizonmodel(r2, 2)) ≈ coef(f2)
+    @test stderror(horizonmodel(r2, 2)) ≈ stderror(f2 + vcov(CR1(:id)))
+
+    # An explicit intercept is absorbed too
+    @test coefnames(lp(@formula(leads(y) ~ 1 + x + fe(id)), df; horizon = 1, unit = :id, time = :t)) == ["x"]
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w + fe(id)), df; horizon = H, unit = :id, time = :t)
+    fiv = Regress.iv(TSLS(), at_horizon(2), @formula(yh ~ (x ~ z) + w + fe(id)); drop_singletons = false) +
+        vcov(CR1(:id))
+    @test coef(horizonmodel(riv, 2)) ≈ coef(fiv)
+    @test stderror(horizonmodel(riv, 2)) ≈ stderror(fiv)
+    @test first_stage(riv, 2).F_robust ≈ Regress.first_stage(fiv).F_robust
+
+    pf(f, d = df) = lp(f, d; horizon = 1, unit = :id, time = :t)
+    @test_throws "fixed effects must appear as separate `fe(column)` terms" pf(@formula(leads(y) ~ x + fe(id) & w))
+    @test_throws "fixed effects must appear as separate `fe(column)` terms" lpiv(
+        TSLS(), @formula(leads(y) ~ (x ~ z + fe(id))), df; horizon = 1
+    )
+    @test_throws "formula must contain at least one regressor besides fixed effects" pf(@formula(leads(y) ~ fe(id)))
+    @test_throws "fixed effect column `nope` is not in the data" pf(@formula(leads(y) ~ x + fe(nope)))
+    dm = allowmissing(df, :id)
+    dm.g = copy(dm.id)
+    dm.g[3] = missing
+    @test_throws "fixed effect column `g` contains missing or NaN values" pf(@formula(leads(y) ~ x + fe(g)), dm)
+end
+
 @testitem "Horizon-indexed model access" tags = [:api, :core] begin
     using DataFrames, StatsBase, StatsModels
     using StableRNGs
@@ -1375,7 +1446,7 @@ end
     using Test
     for name in (
             :AbstractLocalProjection, :lp, :lpiv, :leads, :lags, :lag, :lead, :cumul, :anchor,
-            :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!,
+            :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!, :fe,
         )
         @test Base.isexported(LocalProjections, name)
     end
