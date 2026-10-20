@@ -773,6 +773,43 @@ end
     @test fs.F_nonrobust ≈ Regress.first_stage(refiv).F_nonrobust
 end
 
+@testitem "k-class lpiv matches Regress formula fits" tags = [:lpiv, :iv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using StatsAPI: coef
+    using StableRNGs
+    import Regress
+
+    rng = StableRNG(11)
+    n, h = 300, 2
+    z1, z2, z3, u, w = (randn(rng, n) for _ in 1:5)
+    x = 0.5 .* z1 .+ 0.4 .* z2 .+ 0.3 .* z3 .+ 0.6 .* u
+    y = 1.0 .+ 0.8 .* x .+ 0.2 .* w .+ u .+ 0.15 .* z3
+    df = DataFrame(; y, x, z1, z2, z3, w)
+    # Row t of `fit` holds y[t + h], as `leads(y)` does at horizon h.
+    fit = DataFrame(; yh = [y[(1 + h):end]; fill(missing, h)], x, z1, z2, z3, w)
+    f = @formula(leads(y) ~ (x ~ z1 + z2 + z3) + w)
+    rt = lpiv(TSLS(), f, df; horizon = h)
+
+    for est in (LIML(), Fuller(1.0), KClass(1.5))
+        # Fuller(1)'s kappa is just below 1 at horizon 2 on this sample, which warns
+        fits = () -> (
+            lpiv(est, f, df; horizon = h),
+            Regress.iv(est, fit, @formula(yh ~ (x ~ z1 + z2 + z3) + w)),
+        )
+        r, ref = est isa Fuller ?
+            (@test_logs (:warn, r"kappa < 1") match_mode = :any fits()) : fits()
+        m = horizonmodel(r, h)
+        @test m.estimator == est
+        @test coef(m) ≈ coef(ref)
+        @test stderror(m) ≈ stderror(ref)
+        @test coefpath(r; term = :x) != coefpath(rt; term = :x)
+        # The first stage does not depend on the second-stage estimator
+        @test first_stage(r, h).F_robust ≈ first_stage(rt, h).F_robust
+        @test weakivtest(r, h).F_eff ≈ weakivtest(rt, h).F_eff
+    end
+end
+
 @testitem "Per-horizon models carry coefficient names" tags = [:core, :lpiv, :api] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
@@ -1020,11 +1057,6 @@ end
     )
     @test_throws "Not enough instruments: 1 < 2" lpiv(
         TSLS(), @formula(leads(y) ~ (x + w ~ z)), df; horizon = 1
-    )
-
-    # Estimators without a matrix-based Regress.iv method are rejected up front
-    @test_throws "Regress.jl has no matrix-based `iv` method for LIML" lpiv(
-        LocalProjections.Regress.LIML(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1
     )
 end
 
@@ -1445,7 +1477,8 @@ end
     using LocalProjections
     using Test
     for name in (
-            :AbstractLocalProjection, :lp, :lpiv, :leads, :lags, :lag, :lead, :cumul, :anchor,
+            :AbstractLocalProjection, :lp, :lpiv, :TSLS, :LIML, :Fuller, :KClass,
+            :leads, :lags, :lag, :lead, :cumul, :anchor,
             :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!, :fe,
         )
         @test Base.isexported(LocalProjections, name)

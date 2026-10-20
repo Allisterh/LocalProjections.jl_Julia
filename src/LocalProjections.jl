@@ -1,7 +1,7 @@
 module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
-export lp, lpiv, TSLS, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
+export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export lag, lead, cumul, lags, leads, anchor
 export as_irf_result
 export irfplot, irfplot!
@@ -12,8 +12,8 @@ using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
 using Tables: Tables
 using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, term
-using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
-    AbstractIVEstimator,
+using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LIML, Fuller,
+    KClass, AbstractIVEstimator,
     VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
     DriscollKraay, clusters, timekernel, timeindex, unitindex
@@ -1487,7 +1487,7 @@ end
          unit=nothing, time=nothing) -> LocalProjectionIV
 
 Estimate instrumental-variables local projections from horizon 0 to `horizon` with a
-Regress.jl IV `estimator`, e.g. `TSLS()`.
+Regress.jl IV `estimator`: `TSLS()`, `LIML()`, `Fuller(a)` or `KClass(kappa)`.
 
 # Formula Syntax
 ```julia
@@ -1503,7 +1503,9 @@ Where:
 e.g. `leads(y) ~ (x ~ z) + fe(id)`.
 
 # Arguments
-- `estimator`: a Regress.jl IV estimator with a matrix-based `Regress.iv` method (`TSLS()`)
+- `estimator`: `TSLS()`, `LIML()`, `Fuller(a)` or `KClass(kappa)`; each horizon is fitted
+  with `Regress.iv(estimator, Z, X, y)`. `first_stage` and `weakivtest` do not depend on
+  the estimator.
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
 - `data`: a Tables.jl table, handled as in [`lp`](@ref)
 - `horizon::Integer`: Maximum forecast horizon (must be non-negative)
@@ -1549,12 +1551,6 @@ function lpiv(
         estimator::AbstractIVEstimator, formula::FormulaTerm, data;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing, sample::Symbol = :varying,
         unit::Union{Symbol, Nothing} = nothing, time::Union{Symbol, Nothing} = nothing
-    )
-    hasmethod(iv, Tuple{typeof(estimator), Matrix{Float64}, Matrix{Float64}, Vector{Float64}}) ||
-        throw(
-        ArgumentError(
-            "Regress.jl has no matrix-based `iv` method for $(nameof(typeof(estimator)))"
-        )
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models, rows = _lp_estimate_horizons(

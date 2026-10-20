@@ -18,7 +18,7 @@ This release breaks the 0.1 API. No deprecation shims are provided.
 
 ### Changed
 
-- **`lpiv` takes the IV estimator first**: `lpiv(TSLS(), formula, data; horizon)`, mirroring `Regress.iv`. `TSLS` is re-exported. Estimators without a matrix-based `Regress.iv` method are rejected before fitting.
+- **`lpiv` takes the IV estimator first**: `lpiv(TSLS(), formula, data; horizon)`, mirroring `Regress.iv`. `TSLS()`, `LIML()`, `Fuller(a)` and `KClass(kappa)` are accepted and re-exported; each horizon is fitted by Regress's matrix `iv` for that estimator and matches the Regress formula fit.
 - **Inference uses the stored estimator**: `summarize`, `as_irf_result` and the plotting functions use the estimator set by `lp + vcov(estimator)` (HC1 by default). Passing an estimator is the same as applying it with `+ vcov(estimator)` first.
 - **One computation of IRF bands**: `summarize`, `as_irf_result` and the plots all build their numbers from one `LocalProjectionIRFResult`.
 - **Plots are drawn by MacroEconometricTools**: `irfplot`, `irfplot!` and the Plots recipe hand the IRF object to MacroEconometricTools' Makie methods and Plots recipe. `irfplot!` draws onto any `Axis`.
