@@ -1124,6 +1124,97 @@ end
     )
 end
 
+@testitem "Panel clustered inference" tags = [:panel, :vcov, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using CovarianceMatrices: HC1, CR0, CR1, CR2, Bartlett, DriscollKraay, Clustering
+    using StableRNGs
+
+    rng = StableRNG(20261023)
+    N, T = 4, 12
+    df = DataFrame(
+        id = repeat(["a", "b", "c", "d"], inner = T), t = repeat(1:T, N),
+        y = randn(rng, N * T), x = randn(rng, N * T), z = randn(rng, N * T)
+    )
+    df.grp = repeat(1:2, inner = 2T)
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
+    f = @formula(leads(y) ~ x)
+
+    # Rows used at horizon h, in (unit, time) order: periods 1:(T - h) of every unit
+    used(h) = df[df.t .<= T - h, :]
+    manual_se(r, est, h) = stderror(horizonmodel(r + vcov(HC1()), h) + vcov(est))[2]
+
+    # Panels cluster by unit by default
+    r = lp(f, shuffled; horizon = H, unit = :id, time = :t)
+    @test occursin("Vcov:       CR1(:id)", sprint(show, MIME"text/plain"(), r))
+    @test stderror(r) ≈ [manual_se(r, CR1(used(h).id), h) for h in 0:H]
+    @test stderror(r) == stderror(r + vcov(CR1(:id)))
+    @test DataFrame(summarize(r)).se == stderror(r)
+    @test stderror(r + vcov(HC1())) != stderror(r)
+
+    # Multi-way clusters, other CR estimators, columns outside the formula
+    r2 = r + vcov(CR1((:id, :t)))
+    @test occursin("Vcov:       CR1((:id, :t))", sprint(show, MIME"text/plain"(), r2))
+    @test stderror(r2) ≈ [manual_se(r, CR1((used(h).id, used(h).t)), h) for h in 0:H]
+    @test stderror(r + vcov(CR0(:grp))) ≈ [manual_se(r, CR0(used(h).grp), h) for h in 0:H]
+    @test stderror(r + vcov(CR2(:id))) ≈ [manual_se(r, CR2(used(h).id), h) for h in 0:H]
+
+    # A single series clusters by any column; its default stays HC1
+    a = df[df.id .== "a", :]
+    a.week = repeat(1:3, inner = 4)
+    ra = lp(f, a; horizon = H)
+    @test !occursin("CR1", sprint(show, MIME"text/plain"(), ra))
+    @test stderror(ra + vcov(CR1(:week))) ≈
+        [manual_se(ra, CR1(a.week[1:(T - h)]), h) for h in 0:H]
+
+    # Driscoll-Kraay names the time and unit columns
+    for dk in (DriscollKraay(Bartlett(2); tis = :t, iis = :id), DriscollKraay(Bartlett(2), :t, :id; correction = :sss))
+        rdk = r + vcov(dk)
+        @test occursin("Vcov:       $(repr(dk))", sprint(show, MIME"text/plain"(), rdk))
+        @test stderror(rdk) ≈ [
+            manual_se(r, DriscollKraay(Bartlett(2), used(h).t, used(h).id; correction = dk.correction), h)
+                for h in 0:H
+        ]
+    end
+
+    # A period with no rows at some horizon keeps its distance from its neighbors: with
+    # y missing at t = 6 for every unit, horizon h has no rows at period 6 - h
+    gap = transform(df, [:y, :t] => ByRow((y, t) -> t == 6 ? missing : y) => :y)
+    rg = lp(f, gap; horizon = H, unit = :id, time = :t)
+    dk = DriscollKraay(Bartlett(3); tis = :t, iis = :id)
+    for h in 0:H
+        rows = (gap.t .<= T - h) .& (gap.t .!= 6 - h)
+        th, uh = gap.t[rows], gap.id[rows]
+        on_grid = DriscollKraay(Bartlett(3), Clustering(th, T - h), uh)
+        compressed = DriscollKraay(Bartlett(3), th, uh)
+        @test stderror(rg + vcov(dk))[h + 1] ≈ manual_se(rg, on_grid, h)
+        @test !(stderror(rg + vcov(dk))[h + 1] ≈ manual_se(rg, compressed, h))
+    end
+
+    # IV local projections
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), shuffled; horizon = H, unit = :id, time = :t)
+    @test occursin("Vcov:         CR1(:id)", sprint(show, MIME"text/plain"(), riv))
+    @test stderror(riv) ≈ [manual_se(riv, CR1(used(h).id), h) for h in 0:H]
+    @test stderror(riv + vcov(dk)) ≈ [
+        manual_se(riv, DriscollKraay(Bartlett(3), used(h).t, used(h).id), h) for h in 0:H
+    ]
+
+    # Estimators that cannot be resolved per horizon fail fast
+    @test_throws "cluster column `country` is not in the data" r + vcov(CR1(:country))
+    @test_throws "holds one cluster value per observation" r + vcov(CR1(df.id))
+    @test_throws "holds one time and unit index per observation" r + vcov(
+        DriscollKraay(Bartlett(2), df.t, df.id)
+    )
+    @test_throws "time index column `date` is not in the data" r + vcov(
+        DriscollKraay(Bartlett(2), :date, :id)
+    )
+    dm = allowmissing(df, :grp)
+    dm.grp[T] = missing   # unit "a", period T: used only at h = 0
+    rm = lp(f, dm; horizon = H, unit = :id, time = :t)
+    @test_throws "cluster column `grp` contains missing or NaN values in the rows used at horizon 0" rm +
+        vcov(CR1(:grp))
+end
+
 @testitem "Horizon-indexed model access" tags = [:api, :core] begin
     using DataFrames, StatsBase, StatsModels
     using StableRNGs

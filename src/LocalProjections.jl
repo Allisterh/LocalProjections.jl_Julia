@@ -15,7 +15,8 @@ using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
     AbstractIVEstimator,
     VcovSpec, WeakIVTestResult, FirstStageIV, lags, first_stage, weakivtest
-using CovarianceMatrices: CovarianceMatrices
+using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
+    DriscollKraay, clusters, timekernel, timeindex, unitindex
 using Statistics: quantile
 using Distributions: Normal
 using RecipesBase: RecipesBase, @recipe
@@ -540,6 +541,9 @@ struct LocalProjection{M <: OLSMatrixEstimator} <: AbstractLocalProjection
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
     unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
     time::Union{Symbol, Nothing}  # time column, if any
+    data::NamedTuple            # input table in time order; cluster columns are read from it
+    rows::Vector{BitVector}     # rows of `data` used at each horizon, element h + 1 for horizon h
+    vcov_estimator::Any         # covariance estimator as given, with clusters named by column
 end
 
 function Base.show(io::IO, lp::LocalProjection)
@@ -569,6 +573,10 @@ Returns a new LocalProjection with updated variance-covariance specification for
 This is consistent with Regress.jl's `model + vcov(estimator)` pattern and allows chainable
 operations like `(lp + vcov(A)) + vcov(B)`.
 
+Cluster estimators name their clusters by column of the data passed to [`lp`](@ref),
+e.g. `lp + vcov(CR1(:id))`; each horizon is clustered on the rows it uses, and the result
+displays the estimator as given.
+
 # Arguments
 - `lp::LocalProjection`: The local projection result
 - `v::VcovSpec{V}`: A variance-covariance specification from `vcov(estimator)`
@@ -587,14 +595,93 @@ lp_robust = lp_result + vcov(Bartlett{NeweyWest}())
 @assert coefpath(lp_result) == coefpath(lp_robust)
 ```
 """
-function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEstimator, V}
-    # Apply vcov to each model using Regress.jl's + operator
-    new_models = [m + v for m in lp.models]
-    M_new = eltype(new_models)
-    return LocalProjection{M_new}(
-        convert(Vector{M_new}, new_models),
-        lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
-        lp.tautological_h0, lp.sample, lp.unit, lp.time
+function Base.:+(lp::LocalProjection, v::VcovSpec)
+    models = _apply_vcov(lp, v.source)
+    return LocalProjection{eltype(models)}(
+        models, lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
+        lp.tautological_h0, lp.sample, lp.unit, lp.time, lp.data, lp.rows, v.source
+    )
+end
+
+"""
+    _apply_vcov(lp, estimator) -> Vector
+
+The horizon models of `lp` with `estimator` applied, each through
+[`_horizon_vcov`](@ref).
+"""
+function _apply_vcov(lp::AbstractLocalProjection, estimator)
+    return [
+        m + vcov(_horizon_vcov(estimator, lp, h))
+            for (h, m) in zip(0:lp.horizon, lp.models)
+    ]
+end
+
+"""
+    _horizon_vcov(estimator, lp, h)
+
+The covariance estimator for the model at horizon `h`. Estimators that name columns,
+`CR1(:id)`, `CR1((:id, :t))` or `DriscollKraay(K; tis = :t, iis = :id)`, become the same
+estimator built from those columns of `lp.data`, restricted to the rows used at horizon
+`h`. Other estimators are returned unchanged.
+
+Estimators that hold one value per observation (cluster vectors, Driscoll-Kraay index
+vectors) are an error: each horizon uses its own rows, and with `time` the rows are
+reordered, so no single vector lines up with every horizon.
+"""
+_horizon_vcov(estimator, lp::AbstractLocalProjection, h::Integer) = estimator
+
+function _horizon_vcov(estimator::CR, lp::AbstractLocalProjection, h::Integer)
+    names = clusters(estimator)
+    names isa Tuple{Vararg{Symbol}} || throw(
+        ArgumentError(
+            "$(sprint(show, estimator)) holds one cluster value per observation, but each " *
+                "horizon of a local projection uses its own rows; name the cluster columns " *
+                "instead, e.g. `$(nameof(typeof(estimator)))(:id)`"
+        )
+    )
+    groups = map(name -> _horizon_column(lp, name, "cluster", h), names)
+    return _rebuild_cluster(estimator, groups)
+end
+
+# Values of column `name` of `lp.data` on the rows used at horizon `h`.
+function _horizon_column(lp::AbstractLocalProjection, name::Symbol, role, h::Integer)
+    haskey(lp.data, name) || throw(ArgumentError("$role column `$name` is not in the data"))
+    g = lp.data[name][lp.rows[h + 1]]
+    any(_isunavailable, g) && throw(
+        ArgumentError(
+            "$role column `$name` contains missing or NaN values in the rows used at " *
+                "horizon $h"
+        )
+    )
+    return g
+end
+
+_rebuild_cluster(::CR0, groups::Tuple) = CR0(groups)
+_rebuild_cluster(::CR1, groups::Tuple) = CR1(groups)
+_rebuild_cluster(::CR2, groups::Tuple) = CR2(groups)
+_rebuild_cluster(::CR3, groups::Tuple) = CR3(groups)
+_rebuild_cluster(::Cluster, groups::Tuple) = Cluster(groups)
+
+# Period codes come from the time grid of the whole table, shifted so that the first
+# period used at `h` has code 1: a period with no rows at `h` keeps its place as a zero
+# period sum, and the kernel weights depend on the distance between codes.
+function _horizon_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, h::Integer)
+    tis, iis = timeindex(estimator), unitindex(estimator)
+    tis isa Symbol && iis isa Symbol || throw(
+        ArgumentError(
+            "this DriscollKraay estimator holds one time and unit index per observation, " *
+                "but each horizon of a local projection uses its own rows; name the " *
+                "columns instead, e.g. `DriscollKraay(K; tis = :t, iis = :id)`"
+        )
+    )
+    t = _horizon_column(lp, tis, "time index", h)
+    u = _horizon_column(lp, iis, "unit index", h)
+    grid = sort!(unique(filter(!_isunavailable, lp.data[tis])))
+    codes = [searchsortedfirst(grid, v) for v in t]
+    codes .-= minimum(codes) - 1
+    return DriscollKraay(
+        timekernel(estimator), Clustering(codes, maximum(codes)), u;
+        correction = estimator.correction
     )
 end
 
@@ -1066,7 +1153,8 @@ end
 """
     _lp_estimate_horizons(estimator, X, Z, n_endogenous, lhs, data, groups, horizon, sample)
 
-Fit one model per horizon `0:horizon`: OLS when `estimator === nothing`, otherwise
+Fit one model per horizon `0:horizon` and return the models with the row mask of each
+horizon: OLS when `estimator === nothing`, otherwise
 `Regress.iv(estimator, ...)`. With `sample = :varying`, each horizon uses the rows where
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
@@ -1112,7 +1200,7 @@ function _lp_estimate_horizons(
     for h in 1:horizon
         models[h + 1] = _estimate_horizon(h)
     end
-    return models
+    return models, rows
 end
 
 """
@@ -1149,6 +1237,15 @@ shrinks as `h` grows. With `sample = :fixed`, every horizon uses the rows that a
 available at all horizons `0:horizon`. The per-horizon sample sizes are shown when the
 result is displayed.
 
+Standard errors use `HC1()` by default and, with `unit`, are clustered by unit
+(`CR1(unit)`). `result + vcov(estimator)` replaces the estimator. Cluster estimators
+name their clusters by column, e.g. `CR1(:id)` or `CR1((:id, :t))`; any column of `data`
+can be named, and each horizon is clustered on the rows it uses. Driscoll-Kraay
+standard errors name the time and unit columns the same way, e.g.
+`result + vcov(DriscollKraay(Bartlett(4); tis = :t, iis = :id))`; a period with no rows at
+some horizon still counts in the distance between periods. Estimators that hold one value
+per observation, such as `CR1(groups)` with a vector, are an error.
+
 For instrumental variables, use [`lpiv`](@ref).
 
 # Example
@@ -1163,13 +1260,15 @@ function lp(
         unit::Union{Symbol, Nothing} = nothing, time::Union{Symbol, Nothing} = nothing
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time)
-    models = _lp_estimate_horizons(
+    models, rows = _lp_estimate_horizons(
         nothing, d.X, d.Z, 0, d.lhs, d.data, d.groups, horizon, sample
     )
-    return LocalProjection(
+    result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.response === d.shock, sample, unit, time
+        d.response === d.shock, sample, unit, time, d.data, rows,
+        first(models).vcov_estimator
     )
+    return unit === nothing ? result : result + vcov(CR1(unit))
 end
 
 """
@@ -1265,6 +1364,9 @@ struct LocalProjectionIV{M <: IVMatrixEstimator} <: AbstractLocalProjection
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
     unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
     time::Union{Symbol, Nothing}  # time column, if any
+    data::NamedTuple            # input table in time order; cluster columns are read from it
+    rows::Vector{BitVector}     # rows of `data` used at each horizon, element h + 1 for horizon h
+    vcov_estimator::Any         # covariance estimator as given, with clusters named by column
 end
 
 function Base.show(io::IO, lpiv::LocalProjectionIV)
@@ -1300,18 +1402,16 @@ Returns a new LocalProjectionIV with updated variance-covariance specification f
 ```julia
 result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon=10)
 result_hac = result + vcov(Bartlett{NeweyWest}())
+result_cl = result + vcov(CR1(:id))    # clusters named by column, as for `lp`
 ```
 """
-function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
-        M <: IVMatrixEstimator, V,
-    }
-    new_models = [m + v for m in lpiv.models]
-    M_new = eltype(new_models)
-    return LocalProjectionIV{M_new}(
-        convert(Vector{M_new}, new_models),
-        lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
+function Base.:+(lpiv::LocalProjectionIV, v::VcovSpec)
+    models = _apply_vcov(lpiv, v.source)
+    return LocalProjectionIV{eltype(models)}(
+        models, lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
         lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
-        lpiv.tautological_h0, lpiv.sample, lpiv.unit, lpiv.time
+        lpiv.tautological_h0, lpiv.sample, lpiv.unit, lpiv.time,
+        lpiv.data, lpiv.rows, v.source
     )
 end
 
@@ -1341,7 +1441,8 @@ Where:
   variable. A `shock` that is not a coefficient of the model is an error.
 - `sample::Symbol`: `:varying` (per-horizon samples) or `:fixed` (rows available at
   every horizon), as in [`lp`](@ref)
-- `unit`, `time`: panel unit and time columns, as in [`lp`](@ref)
+- `unit`, `time`: panel unit and time columns, as in [`lp`](@ref); with `unit`, standard
+  errors are clustered by unit
 
 # Returns
 `LocalProjectionIV` struct containing IV models for each horizon.
@@ -1386,13 +1487,15 @@ function lpiv(
         )
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
-    models = _lp_estimate_horizons(
+    models, rows = _lp_estimate_horizons(
         estimator, d.X, d.Z, length(d.endo_names), d.lhs, d.data, d.groups, horizon, sample
     )
-    return LocalProjectionIV(
+    result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.endo_names, d.instr_names, d.response === d.shock, sample, unit, time
+        d.endo_names, d.instr_names, d.response === d.shock, sample, unit, time,
+        d.data, rows, first(models).vcov_estimator
     )
+    return unit === nothing ? result : result + vcov(CR1(unit))
 end
 
 """
@@ -1533,9 +1636,8 @@ function StatsBase.stderror(lp::AbstractLocalProjection; term::Symbol = lp.shock
     return se
 end
 
-# Every horizon model carries the same estimator: `lp` fits all horizons with the
-# default and `lp + vcov(estimator)` replaces it on all of them.
-_vcov_estimator(lp::AbstractLocalProjection) = horizonmodel(lp, 0).vcov_estimator
+# The estimator as given, before clusters named by column are resolved per horizon.
+_vcov_estimator(lp::AbstractLocalProjection) = lp.vcov_estimator
 
 """
     summarize(lp; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary

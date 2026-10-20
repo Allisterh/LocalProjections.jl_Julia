@@ -23,9 +23,13 @@ nothing # hide
 ## Robust Standard Errors
 
 LocalProjections.jl integrates with CovarianceMatrices.jl for robust inference. Each
-result stores a covariance estimator (HC1 by default); `lp_result + vcov(estimator)`
-returns a copy that uses `estimator` at every horizon. `stderror`, `summarize`, the plots
-and `as_irf_result` all use the stored estimator.
+result stores a covariance estimator (HC1 by default, `CR1(unit)` for panels fitted with
+`unit`); `lp_result + vcov(estimator)` returns a copy that uses `estimator` at every
+horizon. `stderror`, `summarize`, the plots and `as_irf_result` all use the stored
+estimator. Cluster estimators name their clusters by column, e.g. `vcov(CR1(:id))`, and
+each horizon is clustered on the rows it uses. Driscoll-Kraay standard errors for panels
+name the time and unit columns the same way:
+`vcov(DriscollKraay(Bartlett(4); tis = :t, iis = :id))`.
 
 ### Heteroskedasticity-Robust (HC)
 
