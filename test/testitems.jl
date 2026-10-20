@@ -1025,6 +1025,105 @@ end
     @test occursin("Sample:       fixed", sprint(show, MIME"text/plain"(), riv_fix))
 end
 
+@testitem "Panel local projections" tags = [:panel, :core, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using StableRNGs
+
+    rng = StableRNG(20261022)
+    N, T = 3, 15
+    df = DataFrame(
+        id = repeat(["a", "b", "c"], inner = T), t = repeat(1:T, N),
+        y = randn(rng, N * T), x = randn(rng, N * T), z = randn(rng, N * T)
+    )
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
+
+    # Regression of resp(g, i, h) on regressors(g, i), pooling rows i of every unit g
+    # for which all values exist inside that unit
+    function pooled(resp, regressors, first_row, h)
+        X = Vector{Float64}[]
+        Y = Float64[]
+        for g in groupby(df, :id; sort = true), i in first_row:(T - h)
+            push!(Y, resp(g, i, h))
+            push!(X, regressors(g, i))
+        end
+        return reduce(hcat, X)' \ Y
+    end
+
+    # Leads and lags are computed within unit; unit dummies through a string column
+    r = lp(@formula(leads(y) ~ x + lags(z, 1) + id), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefnames(r) == ["(Intercept)", "x", "z_lag1", "id: b", "id: c"]
+    @test nobs(r) == [N * (T - 1 - h) for h in 0:H]
+    for h in 0:H
+        @test coef(horizonmodel(r, h)) ≈ pooled(
+            (g, i, h) -> g.y[i + h],
+            (g, i) -> [1.0, g.x[i], g.z[i - 1], g.id[i] == "b", g.id[i] == "c"], 2, h
+        )
+    end
+    rc = lp(@formula(cumul(y) ~ x), shuffled; horizon = H, unit = :id, time = :t)
+    ra = lp(@formula(y | z ~ x), shuffled; horizon = H, unit = :id, time = :t)
+    for h in 0:H
+        @test coef(horizonmodel(rc, h)) ≈
+            pooled((g, i, h) -> sum(g.y[i:(i + h)]), (g, i) -> [1.0, g.x[i]], 1, h)
+        @test coef(horizonmodel(ra, h)) ≈
+            pooled((g, i, h) -> g.y[i + h] - g.z[i], (g, i) -> [1.0, g.x[i]], 1, h)
+    end
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), shuffled; horizon = H, unit = :id, time = :t)
+    @test nobs(riv) == [N * (T - h) for h in 0:H]
+    @test (riv.unit, riv.time) == (:id, :t)
+
+    # Row order does not matter; a single unit matches the time-series fit
+    @test coefpath(lp(@formula(cumul(y) ~ x), df; horizon = H, unit = :id, time = :t)) ==
+        coefpath(rc)
+    a = df[df.id .== "a", :]
+    f = @formula(leads(y) ~ x + lags(z, 2))
+    @test coefpath(lp(f, a; horizon = H, unit = :id, time = :t)) == coefpath(lp(f, a; horizon = H))
+    @test coefpath(lp(f, a[end:-1:1, :]; horizon = H, time = :t)) == coefpath(lp(f, a; horizon = H))
+
+    # Any sortable time values; units of different lengths, some shorter than the horizon
+    quarterly = transform(shuffled, :t => ByRow(t -> "$(2000 + (t - 1) ÷ 4)Q$(mod1(t, 4))") => :q)
+    rq = lp(
+        @formula(leads(y) ~ x + lags(z, 1) + id), quarterly; horizon = H, unit = :id, time = :q
+    )
+    @test coefpath(rq) == coefpath(r)
+    short = vcat(df[df.t .>= 4, :], DataFrame(id = "d", t = [1, 2], y = 1.0, x = 1.0, z = 1.0))
+    rs = lp(@formula(leads(y) ~ x), short; horizon = H, unit = :id, time = :t)
+    @test nobs(rs) == [N * (T - 3 - h) + max(2 - h, 0) for h in 0:H]
+
+    # Display
+    shown = sprint(show, MIME"text/plain"(), r)
+    @test occursin("Unit:       id", shown)
+    @test occursin("Time:       t", shown)
+    @test !occursin("Unit:", sprint(show, MIME"text/plain"(), lp(f, a; horizon = H)))
+
+    # Bad panel structure fails fast
+    f0 = @formula(leads(y) ~ x)
+    @test_throws "time 1 appears in more than one row in unit \"a\"" lp(
+        f0, vcat(df, df[1:1, :]); horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "time 2 appears in more than one row" lp(
+        f0, a[[1, 2, 2, 3], :]; horizon = 1, time = :t
+    )
+    @test_throws "no row at time 5 in unit \"a\", between 4 and 6; add a row with missing values" lp(
+        f0, df[Not(5), :]; horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "`unit` requires `time`" lp(f0, df; horizon = 1, unit = :id)
+    @test_throws "time column `date` is not in the data" lp(
+        f0, df; horizon = 1, unit = :id, time = :date
+    )
+    @test_throws "unit column `country` is not in the data" lp(
+        f0, df; horizon = 1, unit = :country, time = :t
+    )
+    dm = allowmissing(df, :id)
+    dm.id[3] = missing
+    @test_throws "unit column `id` contains missing or NaN values" lp(
+        f0, dm; horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "time column `t` contains missing or NaN values" lp(
+        f0, transform(df, :t => (t -> [t[1:(end - 1)]; NaN]) => :t); horizon = 1, unit = :id, time = :t
+    )
+end
+
 @testitem "Horizon-indexed model access" tags = [:api, :core] begin
     using DataFrames, StatsBase, StatsModels
     using StableRNGs

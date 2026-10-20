@@ -538,6 +538,8 @@ struct LocalProjection{M <: OLSMatrixEstimator} <: AbstractLocalProjection
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
+    unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
+    time::Union{Symbol, Nothing}  # time column, if any
 end
 
 function Base.show(io::IO, lp::LocalProjection)
@@ -552,6 +554,8 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Formula:    $(lp.base_formula)")
     println(io, "  Coef names: $(lp.coef_names)")
     println(io, "  Sample:     $(lp.sample)")
+    lp.unit === nothing || println(io, "  Unit:       $(lp.unit)")
+    lp.time === nothing || println(io, "  Time:       $(lp.time)")
     println(io, "  Vcov:       $(repr(_vcov_estimator(lp)))")
     return println(io, "  Obs (h=0:$(lp.horizon)): $(join(nobs(lp), ", "))")
 end
@@ -590,7 +594,7 @@ function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEs
     return LocalProjection{M_new}(
         convert(Vector{M_new}, new_models),
         lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
-        lp.tautological_h0, lp.sample
+        lp.tautological_h0, lp.sample, lp.unit, lp.time
     )
 end
 
@@ -667,7 +671,6 @@ NaN values are returned when:
 function _create_anchored(y::AbstractVector, z::AbstractVector, h::Int)::Vector{Float64}
     n = length(y)
     length(z) == n || throw(ArgumentError("y and z must have same length"))
-    h > n && throw(ArgumentError("horizon h=$h is too large for series of length $n"))
     return lead(y, h, default = NaN) .- z
 end
 
@@ -807,17 +810,33 @@ function _float_columns(cols)
 end
 
 """
-    _term_columns(terms, data) -> (Matrix{Float64}, Vector{String})
+    _model_columns(t, data, groups) -> Matrix{Float64}
+
+Model columns of the schema-applied term `t`, computed separately on each block of rows
+in `groups` (the units of a panel) and stacked, so leads, lags and cumulative sums never
+cross from one unit into the next.
+"""
+function _model_columns(t, data, groups)
+    length(groups) == 1 && return _float_columns(StatsModels.modelcols(t, data))
+    blocks = [
+        _float_columns(StatsModels.modelcols(t, map(c -> view(c, g), data)))
+            for g in groups
+    ]
+    return reduce(vcat, blocks)::Matrix{Float64}
+end
+
+"""
+    _term_columns(terms, data, groups, nrows) -> (Matrix{Float64}, Vector{String})
 
 Columns and coefficient names of schema-applied `terms`, without an intercept.
 """
 _coefname_vector(t) = (n = StatsModels.coefnames(t); n isa AbstractVector ? n : [n])
 
-function _term_columns(terms, data, nrows::Integer)
+function _term_columns(terms, data, groups, nrows::Integer)
     names = String[]
     cols = Matrix{Float64}[]
     for t in terms
-        push!(cols, _float_columns(StatsModels.modelcols(t, data)))
+        push!(cols, _model_columns(t, data, groups))
         append!(names, _coefname_vector(t))
     end
     isempty(cols) && return Matrix{Float64}(undef, nrows, 0), names
@@ -852,6 +871,72 @@ function _missing_to_nan(tbl, vars)
     return NamedTuple{keys(tbl)}(cols)
 end
 
+_isunavailable(v) = ismissing(v) || (v isa AbstractFloat && isnan(v))
+
+"""
+    _panel_order(tbl, unit, time) -> (Tables.ColumnTable, Vector{UnitRange{Int}})
+
+Sort the rows of `tbl` by `unit` and `time` and return the sorted table with the row
+range of each unit. Without `time`, rows keep their order and form a single block.
+
+Within a unit, consecutive rows must be consecutive periods of the time grid formed by
+all values of `time` in the data. A repeated `(unit, time)` pair, or a unit that skips a
+period present elsewhere in the data, is an error: leads and lags would otherwise shift
+across the missing period.
+"""
+function _panel_order(tbl, unit, time)
+    Base.require_one_based_indexing(values(tbl)...)
+    nrows = isempty(tbl) ? 0 : length(first(tbl))
+    if time === nothing
+        unit === nothing || throw(
+            ArgumentError(
+                "`unit` requires `time`: rows are ordered by time within each unit"
+            )
+        )
+        return tbl, [1:nrows]
+    end
+    for (kw, name) in ((:unit, unit), (:time, time))
+        name === nothing && continue
+        haskey(tbl, name) ||
+            throw(ArgumentError("$kw column `$name` is not in the data"))
+        any(_isunavailable, tbl[name]) && throw(
+            ArgumentError("$kw column `$name` contains missing or NaN values")
+        )
+    end
+    times = tbl[time]
+    units = unit === nothing ? fill(nothing, nrows) : tbl[unit]
+    perm = unit === nothing ? sortperm(times) : sortperm(collect(zip(units, times)))
+    if perm != 1:nrows
+        tbl = map(c -> c[perm], tbl)
+        times, units = times[perm], units[perm]
+    end
+
+    grid = sort!(unique(times))
+    period = Dict(t => i for (i, t) in pairs(grid))
+    groups = UnitRange{Int}[]
+    start = 1
+    for i in 2:(nrows + 1)
+        if i > nrows || !isequal(units[i], units[start])
+            push!(groups, start:(i - 1))
+            start = i
+            continue
+        end
+        in_unit = unit === nothing ? "" : " in unit $(repr(units[i]))"
+        step = period[times[i]] - period[times[i - 1]]
+        step == 0 && throw(
+            ArgumentError("time $(repr(times[i])) appears in more than one row$in_unit")
+        )
+        step == 1 || throw(
+            ArgumentError(
+                "no row at time $(repr(grid[period[times[i - 1]] + 1]))$in_unit, " *
+                    "between $(repr(times[i - 1])) and $(repr(times[i])); add a row " *
+                    "with missing values for that period so leads and lags do not skip it"
+            )
+        )
+    end
+    return tbl, groups
+end
+
 """
     _select_shock(shock, coef_names, endo_names) -> Symbol
 
@@ -879,22 +964,26 @@ function _select_shock(shock, coef_names, endo_names)
 end
 
 """
-    _lp_design(formula, data, horizon, shock, instrumented::Bool)
+    _lp_design(formula, data, horizon, shock, instrumented::Bool, unit, time)
 
 Parse `formula` and build the matrices shared by every horizon of [`lp`](@ref) and
 [`lpiv`](@ref). `instrumented` states whether `(endogenous ~ instruments)` terms are
-required (`lpiv`) or forbidden (`lp`).
+required (`lpiv`) or forbidden (`lp`). `unit` and `time` name the panel columns, or are
+`nothing`; see [`_panel_order`](@ref).
 
 Returns a `NamedTuple` with the regressor matrix `X = [exogenous endogenous]`, the
 instrument matrix `Z = [exogenous instruments]` (equal to `X` without instruments),
 coefficient, endogenous and instrument names, the response name, the unwrapped LHS,
-the data as a `Tables.ColumnTable`, and the validated shock.
+the data as a `Tables.ColumnTable` in time order, the row range of each unit, and the
+validated shock.
 
-Rows are never dropped here: row order is time order, so leads must be computed on the
-full table. `missing` in numeric columns becomes `NaN` and is excluded per horizon by
+Rows are never dropped here: leads must be computed on the full table. `missing` in
+numeric columns becomes `NaN` and is excluded per horizon by
 [`_lp_estimate_horizons`](@ref).
 """
-function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrumented::Bool)
+function _lp_design(
+        formula::FormulaTerm, data, horizon::Integer, shock, instrumented::Bool, unit, time
+    )
     horizon < 0 && throw(ArgumentError("horizon must be non-negative (got $horizon)"))
     Tables.istable(data) || throw(
         ArgumentError(
@@ -903,7 +992,8 @@ function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrum
         )
     )
     all_vars = _extract_all_vars_from_formula(formula)
-    tbl = _missing_to_nan(Tables.columntable(data), all_vars)
+    tbl, groups = _panel_order(Tables.columntable(data), unit, time)
+    tbl = _missing_to_nan(tbl, all_vars)
 
     exo_raw, iv_raw = _split_rhs(formula.rhs)
     if instrumented
@@ -933,7 +1023,7 @@ function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrum
     # Exogenous regressors, including the intercept unless the formula removes it
     exo_rhs = isempty(exo_raw) ? ConstantTerm(1) : Tuple(exo_raw)
     exo_f = StatsModels.apply_schema(FormulaTerm(Term(response), exo_rhs), sch, StatisticalModel)
-    X_exo = _float_columns(StatsModels.modelcols(exo_f.rhs, tbl))
+    X_exo = _model_columns(exo_f.rhs, tbl, groups)
     exo_names = Vector{String}(_coefname_vector(exo_f.rhs))
 
     endo_terms = AbstractTerm[]
@@ -946,8 +1036,8 @@ function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrum
             push!(instr_terms, StatsModels.apply_schema(z, sch, LPSchemaContext))
         end
     end
-    X_endo, endo_names = _term_columns(endo_terms, tbl, nrows)
-    Z_instr, instr_names = _term_columns(instr_terms, tbl, nrows)
+    X_endo, endo_names = _term_columns(endo_terms, tbl, groups, nrows)
+    Z_instr, instr_names = _term_columns(instr_terms, tbl, groups, nrows)
     length(instr_names) >= length(endo_names) || throw(
         ArgumentError(
             "Not enough instruments: $(length(instr_names)) < $(length(endo_names)) " *
@@ -960,7 +1050,7 @@ function _lp_design(formula::FormulaTerm, data, horizon::Integer, shock, instrum
         X = hcat(X_exo, X_endo)::Matrix{Float64},
         Z = hcat(X_exo, Z_instr)::Matrix{Float64},
         coef_names, endo_names, instr_names, response, lhs,
-        data = tbl,
+        data = tbl, groups,
         shock = _select_shock(shock, coef_names, endo_names),
     )
 end
@@ -974,19 +1064,20 @@ function _fit_horizon(estimator, X, Z, y, n_endogenous)
 end
 
 """
-    _lp_estimate_horizons(estimator, X, Z, n_endogenous, lhs, data, horizon, sample)
+    _lp_estimate_horizons(estimator, X, Z, n_endogenous, lhs, data, groups, horizon, sample)
 
 Fit one model per horizon `0:horizon`: OLS when `estimator === nothing`, otherwise
 `Regress.iv(estimator, ...)`. With `sample = :varying`, each horizon uses the rows where
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
+The response is computed within each block of rows in `groups`.
 
 `X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
 abstract return types of StatsModels.
 """
 function _lp_estimate_horizons(
         estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
-        lhs, data, horizon::Integer, sample::Symbol
+        lhs, data, groups, horizon::Integer, sample::Symbol
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
@@ -994,7 +1085,7 @@ function _lp_estimate_horizons(
     complete_xz = vec(all(!isnan, X, dims = 2)) .& vec(all(!isnan, Z, dims = 2))
     # Vector{Float64}: modelcols may return a ShiftedArray or contain `missing`
     ys = [
-        _float_columns(StatsModels.modelcols(_build_lhs_for_horizon(h, lhs...), data))[:, 1]
+        _model_columns(_build_lhs_for_horizon(h, lhs...), data, groups)[:, 1]
             for h in 0:horizon
     ]
     rows = [complete_xz .& .!isnan.(y) for y in ys]
@@ -1025,13 +1116,26 @@ function _lp_estimate_horizons(
 end
 
 """
-    lp(formula, data; horizon, shock=nothing, sample=:varying) -> LocalProjection
+    lp(formula, data; horizon, shock=nothing, sample=:varying, unit=nothing, time=nothing)
+        -> LocalProjection
 
 Estimate OLS local projections from horizon 0 to `horizon`, one regression per horizon.
 
-`data` is any Tables.jl table whose row order is time order. Numeric columns enter as
-continuous variables; other columns (strings, `CategoricalArray`s) enter as categorical
-variables through StatsModels contrasts.
+`data` is any Tables.jl table. Numeric columns enter as continuous variables; other
+columns (strings, `CategoricalArray`s) enter as categorical variables through
+StatsModels contrasts.
+
+Without `time`, row order is time order. With `time = :t`, rows are sorted by the
+column `t` first, and a time value that appears twice is an error. For a panel, `unit`
+names the column identifying the cross-sectional unit (it requires `time`): rows are
+sorted by unit and time, and leads, lags, cumulative sums and anchors are computed
+within each unit, so no value is shifted from one unit into another. The time values
+found anywhere in the data form the time grid; a unit that skips a period of that grid
+between its first and last observation is an error (add a row with missing values for
+the period instead). Units may start and end at different times. A single series has no
+other units to reveal a skipped period, so its rows are taken as consecutive. Unit fixed effects
+enter as a categorical control, e.g. `leads(y) ~ x + id` with `id` a string or
+`CategoricalArray` column.
 
 The response must be written with `leads(y)`, `cumul(y)`, `anchor(y, z)` or the pipe
 syntax `y|z`. `shock` names the coefficient whose path is reported by
@@ -1055,13 +1159,16 @@ coefpath(result)            # path of `x`
 """
 function lp(
         formula::FormulaTerm, data;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing, sample::Symbol = :varying
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing, sample::Symbol = :varying,
+        unit::Union{Symbol, Nothing} = nothing, time::Union{Symbol, Nothing} = nothing
     )
-    d = _lp_design(formula, data, horizon, shock, false)
-    models = _lp_estimate_horizons(nothing, d.X, d.Z, 0, d.lhs, d.data, horizon, sample)
+    d = _lp_design(formula, data, horizon, shock, false, unit, time)
+    models = _lp_estimate_horizons(
+        nothing, d.X, d.Z, 0, d.lhs, d.data, d.groups, horizon, sample
+    )
     return LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.response === d.shock, sample
+        d.response === d.shock, sample, unit, time
     )
 end
 
@@ -1156,6 +1263,8 @@ struct LocalProjectionIV{M <: IVMatrixEstimator} <: AbstractLocalProjection
     instrument_names::Vector{String}
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
+    unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
+    time::Union{Symbol, Nothing}  # time column, if any
 end
 
 function Base.show(io::IO, lpiv::LocalProjectionIV)
@@ -1175,6 +1284,8 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Instruments:  $(lpiv.instrument_names)")
     println(io, "  Coef names:   $(lpiv.coef_names)")
     println(io, "  Sample:       $(lpiv.sample)")
+    lpiv.unit === nothing || println(io, "  Unit:         $(lpiv.unit)")
+    lpiv.time === nothing || println(io, "  Time:         $(lpiv.time)")
     println(io, "  Vcov:         $(repr(_vcov_estimator(lpiv)))")
     return println(io, "  Obs (h=0:$(lpiv.horizon)): $(join(nobs(lpiv), ", "))")
 end
@@ -1200,12 +1311,13 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
         convert(Vector{M_new}, new_models),
         lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
         lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
-        lpiv.tautological_h0, lpiv.sample
+        lpiv.tautological_h0, lpiv.sample, lpiv.unit, lpiv.time
     )
 end
 
 """
-    lpiv(estimator, formula, data; horizon, shock=nothing, sample=:varying) -> LocalProjectionIV
+    lpiv(estimator, formula, data; horizon, shock=nothing, sample=:varying,
+         unit=nothing, time=nothing) -> LocalProjectionIV
 
 Estimate instrumental-variables local projections from horizon 0 to `horizon` with a
 Regress.jl IV `estimator`, e.g. `TSLS()`.
@@ -1223,12 +1335,13 @@ Where:
 # Arguments
 - `estimator`: a Regress.jl IV estimator with a matrix-based `Regress.iv` method (`TSLS()`)
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
-- `data`: a Tables.jl table whose row order is time order (handled as in [`lp`](@ref))
+- `data`: a Tables.jl table, handled as in [`lp`](@ref)
 - `horizon::Integer`: Maximum forecast horizon (must be non-negative)
 - `shock::Union{Symbol, Nothing}`: coefficient to track; defaults to the first endogenous
   variable. A `shock` that is not a coefficient of the model is an error.
 - `sample::Symbol`: `:varying` (per-horizon samples) or `:fixed` (rows available at
   every horizon), as in [`lp`](@ref)
+- `unit`, `time`: panel unit and time columns, as in [`lp`](@ref)
 
 # Returns
 `LocalProjectionIV` struct containing IV models for each horizon.
@@ -1263,7 +1376,8 @@ println("First-stage coefs: ", coef(fs[1]))
 """
 function lpiv(
         estimator::AbstractIVEstimator, formula::FormulaTerm, data;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing, sample::Symbol = :varying
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing, sample::Symbol = :varying,
+        unit::Union{Symbol, Nothing} = nothing, time::Union{Symbol, Nothing} = nothing
     )
     hasmethod(iv, Tuple{typeof(estimator), Matrix{Float64}, Matrix{Float64}, Vector{Float64}}) ||
         throw(
@@ -1271,13 +1385,13 @@ function lpiv(
             "Regress.jl has no matrix-based `iv` method for $(nameof(typeof(estimator)))"
         )
     )
-    d = _lp_design(formula, data, horizon, shock, true)
+    d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models = _lp_estimate_horizons(
-        estimator, d.X, d.Z, length(d.endo_names), d.lhs, d.data, horizon, sample
+        estimator, d.X, d.Z, length(d.endo_names), d.lhs, d.data, d.groups, horizon, sample
     )
     return LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.endo_names, d.instr_names, d.response === d.shock, sample
+        d.endo_names, d.instr_names, d.response === d.shock, sample, unit, time
     )
 end
 
