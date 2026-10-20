@@ -522,6 +522,9 @@ end
     @test :x in Symbol.(result.endogenous_names) || "x" in result.endogenous_names
     @test :z in Symbol.(result.instrument_names) || "z" in result.instrument_names
 
+    # The stored estimator is the covariance estimator, not the IV estimator
+    @test occursin(r"Vcov: +(CovarianceMatrices\.)?HR1\(\)", sprint(show, MIME"text/plain"(), result))
+
     # Extract IRF - coefficient should be close to 2.0 for horizon 0
     irf = coefpath(result; term = :x)
     @test length(irf) == horizon + 1

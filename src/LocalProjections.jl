@@ -1276,7 +1276,7 @@ function lp(
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
         d.response === d.shock, sample, unit, time, d.data, rows,
-        first(models).vcov_estimator
+        CovarianceMatrices.estimator(vcov(first(models)))
     )
     return unit === nothing ? result : result + vcov(CR1(unit))
 end
@@ -1504,7 +1504,7 @@ function lpiv(
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
         d.endo_names, d.instr_names, d.response === d.shock, sample, unit, time,
-        d.data, rows, first(models).vcov_estimator
+        d.data, rows, CovarianceMatrices.estimator(vcov(first(models)))
     )
     return unit === nothing ? result : result + vcov(CR1(unit))
 end
