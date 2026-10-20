@@ -2,6 +2,7 @@ using TestItems
 
 @testitem "cumul transformation" tags = [:cumul, :core] begin
     using LocalProjections
+    using LocalProjections: CumulTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -41,6 +42,7 @@ end
 
 @testitem "leads transformation" tags = [:leads, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
     using ShiftedArrays: lead
 
@@ -83,6 +85,7 @@ end
 
 @testitem "anchor function syntax" tags = [:anchor, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data with both y and z
@@ -120,6 +123,7 @@ end
 
 @testitem "anchor pipe syntax" tags = [:anchor, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -166,6 +170,7 @@ end
 
 @testitem "modelcols anchor matches manual lead computation" tags = [:anchor, :verification] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Test
 
     # Create test data
@@ -197,6 +202,7 @@ end
 
 @testitem "cumulative anchor (nested)" tags = [:nested, :anchor, :cumul] begin
     using LocalProjections
+    using LocalProjections: CumulTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -410,7 +416,7 @@ end
 
 @testitem "plus vcov operator" tags = [:vcov, :api] begin
     using LocalProjections
-    using LocalProjections: VcovSpec
+    using Regress: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
 
@@ -482,7 +488,7 @@ end
 
 @testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin
     using LocalProjections
-    using LocalProjections: FirstStageIV
+    using Regress: FirstStageIV
     using DataFrames, StatsModels, Test
     using Random
     using CovarianceMatrices: HC1
@@ -577,7 +583,7 @@ end
 
 @testitem "lpiv plus vcov operator" tags = [:lpiv, :vcov, :api] begin
     using LocalProjections
-    using LocalProjections: VcovSpec
+    using Regress: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
     using Random
@@ -730,6 +736,7 @@ end
 
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
+    using Regress: WeakIVTestResult
     using DataFrames, StableRNGs, StatsModels
 
     rng = StableRNG(4433222)
@@ -811,6 +818,7 @@ end
 @testitem "tautological h=0 when response == shock" tags = [:lpiv, :iv, :tautological] begin
     using LocalProjections
     using DataFrames, StableRNGs, StatsModels
+    using Regress: FirstStageIV
     using CovarianceMatrices: HC1
 
     rng = StableRNG(7766)
@@ -862,7 +870,7 @@ end
     @test isfinite(weakivtest(result, 1).F_eff)
 
     # first_stage at h=0 is still available
-    @test first_stage(result, 0) isa LocalProjections.FirstStageIV
+    @test first_stage(result, 0) isa FirstStageIV
 
     # OLS LP where response == shock
     ols_result = lp(@formula(leads(x) ~ x + w), df; horizon = horizon)
@@ -1287,4 +1295,22 @@ end
     msg = "confidence levels must lie strictly between 0 and 1; got 95"
     @test_throws msg irfplot(r; levels = [95])
     @test_throws msg Plots.plot(r; levels = [95])
+end
+
+@testitem "export surface" tags = [:api] begin
+    using LocalProjections
+    using Test
+    for name in (
+            :AbstractLocalProjection, :lp, :lpiv, :leads, :lags, :lag, :lead, :cumul, :anchor,
+            :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!,
+        )
+        @test Base.isexported(LocalProjections, name)
+    end
+    for name in (:CumulTerm, :LeadTerm, :AnchorTerm)
+        @test Base.ispublic(LocalProjections, name)
+        @test !Base.isexported(LocalProjections, name)
+    end
+    for name in (:WeakIVTestResult, :FirstStageIV, :LocalProjectionIRFResult, :LPSchemaContext, :VcovSpec)
+        @test !Base.ispublic(LocalProjections, name)
+    end
 end

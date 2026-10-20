@@ -2,10 +2,10 @@ module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
-export WeakIVTestResult, FirstStageIV
-export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
-export as_irf_result, LocalProjectionIRFResult
+export lag, lead, cumul, lags, leads, anchor
+export as_irf_result
 export irfplot, irfplot!
+public CumulTerm, LeadTerm, AnchorTerm
 
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, @crayon_str
@@ -14,7 +14,7 @@ using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, term
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS,
     AbstractIVEstimator,
-    VcovSpec, WeakIVTestResult, FirstStageIV, lags, first_stage, weakivtest
+    VcovSpec, lags, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
     DriscollKraay, clusters, timekernel, timeindex, unitindex
 using Statistics: quantile
@@ -242,8 +242,10 @@ Create lead term with NaN handling. Used in formulas like:
 - `@formula(leads(y, 3) ~ x)` - explicit horizon for standalone use
 - `@formula(leads(log(y)) ~ x)` - supports nested transformations
 
-Note: Named 'leads' to distinguish from ShiftedArrays.lead (which returns missing).
-This version returns Float64 with NaN for type stability.
+`leads(y, h)` is one column, `y` at `t + h`. It is not the mirror image of
+`lags(x, p)`, which expands to the `p` columns `x` at `t - 1, ..., t - p`.
+ShiftedArrays' `lead(y, h)` and `lag(x, p)` (also exported) are single shifts padded
+with `missing`; `leads` pads with `NaN` and returns `Float64`.
 """
 leads(t::T) where {T <: AbstractTerm} = LeadTerm{T}(t, nothing)
 leads(t::T, h::Int) where {T <: AbstractTerm} = LeadTerm{T}(t, h)
@@ -1503,7 +1505,7 @@ end
 
 Return first-stage regressions and diagnostics for all horizons.
 
-Returns a vector of `FirstStageIV`, one per horizon (0 to `lpiv.horizon`).
+Returns a vector of `Regress.FirstStageIV`, one per horizon (0 to `lpiv.horizon`).
 Each contains full OLS models plus non-robust and robust first-stage F-statistics.
 """
 function Regress.first_stage(lpiv::LocalProjectionIV)
@@ -1511,7 +1513,7 @@ function Regress.first_stage(lpiv::LocalProjectionIV)
 end
 
 """
-    first_stage(lpiv::LocalProjectionIV, h::Int) -> FirstStageIV
+    first_stage(lpiv::LocalProjectionIV, h::Int) -> Regress.FirstStageIV
 
 Return first-stage regressions and diagnostics for horizon `h` (0-indexed).
 
@@ -1537,7 +1539,7 @@ end
 # ============================================================================
 
 """
-    weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...) -> WeakIVTestResult
+    weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...) -> Regress.WeakIVTestResult
 
 Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
 
@@ -1551,7 +1553,7 @@ is exactly 1) and there is no IV estimate to test; `weakivtest(lpiv, 0)` then th
 - `benchmark::Symbol=:nagar`: Bias benchmark (`:nagar` or `:ols`)
 
 # Returns
-A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
+A `Regress.WeakIVTestResult` containing effective F, robust F, critical values, etc.
 
 See also: [`lpiv`](@ref), [`first_stage`](@ref)
 """
@@ -1574,7 +1576,7 @@ end
 
 Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
-Returns a vector with one `WeakIVTestResult` per horizon `0:lpiv.horizon`. When the
+Returns a vector with one `Regress.WeakIVTestResult` per horizon `0:lpiv.horizon`. When the
 response is the endogenous shock, the entry for horizon 0 is `nothing` (see
 `weakivtest(lpiv, h)`), so the vector stays aligned with the horizons.
 """
