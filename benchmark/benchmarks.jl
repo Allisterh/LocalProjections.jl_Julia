@@ -15,6 +15,7 @@ using StableRNGs
 
 using LocalProjections
 using CovarianceMatrices
+using StatsModels: @formula
 
 # ============================================================================
 # Data Generation
@@ -146,14 +147,14 @@ let rng = StableRNG(DEFAULT_SEED + 30)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 12)
 
-    SUITE["vcov"]["hc1_h12"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h12"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 let rng = StableRNG(DEFAULT_SEED + 31)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 24)
 
-    SUITE["vcov"]["hc1_h24"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h24"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 # ----------------------------------------------------------------------------
