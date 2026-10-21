@@ -2,7 +2,7 @@ module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
-export lag, lead, cumul, lags, leads, anchor
+export @formula, lag, lead, cumul, lags, leads, anchor
 export as_irf_result
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm
@@ -11,7 +11,7 @@ using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, @crayon_str
 using Tables: Tables
 using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
-    FormulaTerm, term
+    FormulaTerm, term, @formula
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LIML, Fuller,
     KClass, AbstractIVEstimator,
     VcovSpec, lags, fe, first_stage, weakivtest
@@ -1521,7 +1521,7 @@ e.g. `leads(y) ~ (x ~ z) + fe(id)`.
 
 # Example
 ```julia
-using LocalProjections, DataFrames, StatsModels, CovarianceMatrices
+using LocalProjections, DataFrames, CovarianceMatrices
 
 # Generate data with endogeneity
 n = 200

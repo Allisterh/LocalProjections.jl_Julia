@@ -844,6 +844,16 @@ end
     @test coefnames(only(fs.models)) == ["(Intercept)", "w", "z"]
 end
 
+@testitem "@formula is exported" tags = [:api] begin
+    using LocalProjections
+    using DataFrames, Test
+    import StatsModels
+
+    @test LocalProjections.var"@formula" === StatsModels.var"@formula"
+    df = DataFrame(y = randn(50), x = randn(50))
+    @test lp(@formula(leads(y) ~ x), df; horizon = 2) isa LocalProjection
+end
+
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
     using Regress: WeakIVTestResult

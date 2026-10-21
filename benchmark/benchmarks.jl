@@ -15,7 +15,6 @@ using StableRNGs
 
 using LocalProjections
 using CovarianceMatrices
-using StatsModels: @formula
 
 # ============================================================================
 # Data Generation

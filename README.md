@@ -14,7 +14,7 @@ Pkg.add(url="https://github.com/gragusa/LocalProjections.jl")
 ## Example
 
 ```julia
-using LocalProjections, DataFrames, StatsModels, CovarianceMatrices, Plots
+using LocalProjections, DataFrames, CovarianceMatrices, Plots
 
 # Generate sample data
 n = 200
