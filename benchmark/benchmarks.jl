@@ -126,14 +126,14 @@ SUITE["lpiv"] = BenchmarkGroup()
 let rng = StableRNG(DEFAULT_SEED + 20)
     df = generate_lpiv_data(rng, 500)
 
-    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
 end
 
 let rng = StableRNG(DEFAULT_SEED + 21)
     df = generate_lpiv_data(rng, 1000)
 
-    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
-    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
+    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
 end
 
 # ----------------------------------------------------------------------------
@@ -146,14 +146,14 @@ let rng = StableRNG(DEFAULT_SEED + 30)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 12)
 
-    SUITE["vcov"]["hc1_h12"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h12"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 let rng = StableRNG(DEFAULT_SEED + 31)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 24)
 
-    SUITE["vcov"]["hc1_h24"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h24"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 # ----------------------------------------------------------------------------
